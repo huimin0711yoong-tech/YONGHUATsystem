@@ -1,0 +1,233 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Forms to handle · YONGHUAT SYSTEM</title>
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <script src="config.js"></script>
+  <script src="app.js"></script>
+  <style>
+    .filters { display:grid; gap:8px 12px; grid-template-columns:repeat(auto-fit, minmax(160px, 1fr)); }
+    .filters label { margin:0 0 4px; font-size:.85rem; }
+    .counts { display:flex; flex-wrap:wrap; gap:8px; margin-top:12px; }
+    .counts button { background:#fff; border:1px solid #cbd2d9; font-size:.9rem; padding:6px 12px; }
+    .counts button.active { background:var(--brand); color:#fff; border-color:var(--brand); }
+    .list { display:grid; gap:12px; }
+    .req { background:#fff; border-radius:12px; padding:16px; box-shadow:0 2px 10px rgba(0,0,0,.06); border-left:5px solid var(--line); }
+    .req.late { border-left-color:var(--red); }
+    .top { display:flex; justify-content:space-between; gap:8px; align-items:flex-start; flex-wrap:wrap; }
+    .what { font-weight:700; font-size:1.05rem; }
+    .meta { font-size:.88rem; color:var(--muted); margin-top:4px; }
+    .info { font-size:.9rem; margin-top:8px; padding:8px 10px; background:#f8fafc; border-radius:8px; }
+    .note { margin-top:8px; white-space:pre-line; }
+    .actions { display:flex; flex-wrap:wrap; gap:8px; margin-top:12px; }
+    .actions button { font-size:.9rem; padding:8px 14px; }
+    .b-approve { background:var(--green); color:#fff; } .b-reject { background:var(--red); color:#fff; }
+    .b-done { background:var(--brand); color:#fff; } .b-delete { background:#fff; color:var(--red); border-color:var(--red); }
+    .pill { display:inline-block; padding:2px 10px; border-radius:999px; font-size:.8rem; font-weight:700; white-space:nowrap; }
+    .s-new { background:#dbeafe; color:#1e40af; } .s-approved { background:var(--green-bg); color:var(--green); }
+    .s-rejected { background:var(--red-bg); color:var(--red); } .s-done { background:#e5e7eb; color:#374151; }
+    .s-cancelled { background:#f3f4f6; color:#6b7280; }
+    .p-red { background:var(--red); color:#fff; } .p-orange { background:var(--orange); color:#fff; } .p-late { background:var(--red); color:#fff; }
+  </style>
+</head>
+<body>
+  <div class="wrap" id="loading"><p class="muted">Loading…</p></div>
+
+  <div class="wrap hidden" id="page">
+    <p><a href="index.html">← Back to menu</a></p>
+    <h1>Forms to handle</h1>
+    <p class="muted">Delivery and reorder forms from staff. Approve or reject new forms, then mark them done when finished.</p>
+
+    <div class="card">
+      <div class="filters">
+        <div><label for="fType">Type</label>
+          <select id="fType"><option value="">All</option><option value="delivery">🚚 Delivery</option><option value="reorder">📦 Reorder</option></select></div>
+        <div><label for="fSearch">Search</label><input id="fSearch" type="search" placeholder="S/O, item, staff name"></div>
+      </div>
+      <div class="counts" id="counts"></div>
+    </div>
+
+    <div id="msg" class="msg"></div>
+    <div class="list" id="list"></div>
+  </div>
+
+<script>
+  const $ = (id) => document.getElementById(id);
+  const STATUS_LABEL = { new: 'Waiting for approval', approved: 'Approved', rejected: 'Rejected', done: 'Done', cancelled: 'Cancelled' };
+  const STATUS_ORDER = ['new', 'approved', 'done', 'rejected', 'cancelled'];
+  let ME = null, ALL = [], PEOPLE = {}, SO_INFO = {}, ITEM_DESC = {}, RULES = { red: 3, orange: 1 };
+  let statusFilter = 'new';
+  let TODAY = '';
+
+  function malaysiaToday() {
+    return new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kuala_Lumpur', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
+  }
+  function daysBetween(a, b) { return Math.round((Date.parse(b + 'T00:00:00Z') - Date.parse(a + 'T00:00:00Z')) / 86400000); }
+  const nameOf = (id) => (PEOPLE[id] && (PEOPLE[id].full_name || PEOPLE[id].email)) || 'Unknown';
+
+  async function loadAll() {
+    const [{ data: reqs, error: e1 }, { data: people, error: e2 }, { data: sets }] = await Promise.all([
+      db.from('requests').select('*').order('created_at', { ascending: false }).limit(1000),
+      db.from('profiles').select('id, full_name, email'),
+      db.from('settings').select('key, value').in('key', ['red_days', 'orange_days'])
+    ]);
+    if (e1) throw e1;
+    if (e2) throw e2;
+    ALL = reqs;
+    PEOPLE = Object.fromEntries(people.map((p) => [p.id, p]));
+    (sets || []).forEach((s) => { const n = parseInt(s.value, 10); if (!isNaN(n)) RULES[s.key === 'red_days' ? 'red' : 'orange'] = n; });
+
+    // Extra facts from the eFichain data: S/O details for delivery forms, item names for reorder forms
+    const soNos = [...new Set(ALL.filter((r) => r.so_no).map((r) => r.so_no))];
+    const items = [...new Set(ALL.filter((r) => r.type === 'reorder' && r.item).map((r) => r.item.split(/\s+/)[0]))];
+    SO_INFO = {}; ITEM_DESC = {};
+    for (let i = 0; i < soNos.length; i += 200) {
+      const { data } = await db.from('so_lines').select('so_no, customer, so_date, amount, delivery_status, order_status, line_status')
+        .in('so_no', soNos.slice(i, i + 200));
+      (data || []).forEach((l) => {
+        const s = SO_INFO[l.so_no] || (SO_INFO[l.so_no] = { customer: l.customer, so_date: l.so_date, amount: 0, lines: 0, ship: new Set() });
+        if ((l.line_status || '') !== 'DELETED') { s.amount += Number(l.amount || 0); s.lines += 1; }
+        s.ship.add(l.delivery_status);
+      });
+    }
+    for (let i = 0; i < items.length; i += 200) {
+      const { data } = await db.from('so_lines').select('item, item_desc').in('item', items.slice(i, i + 200)).limit(1000);
+      (data || []).forEach((l) => { if (l.item_desc) ITEM_DESC[l.item] = l.item_desc; });
+    }
+  }
+
+  function renderCounts(rows) {
+    const c = $('counts'); c.innerHTML = '';
+    [['all', 'All']].concat(STATUS_ORDER.map((s) => [s, STATUS_LABEL[s]])).forEach(([key, label]) => {
+      const n = key === 'all' ? rows.length : rows.filter((r) => r.status === key).length;
+      const b = document.createElement('button');
+      b.type = 'button'; b.textContent = label + ' (' + n + ')';
+      if (key === statusFilter) b.classList.add('active');
+      b.addEventListener('click', () => { statusFilter = key; render(); });
+      c.appendChild(b);
+    });
+  }
+
+  async function setStatus(r, status, btn) {
+    const verb = { approved: 'Approve', rejected: 'Reject', done: 'Mark as done' }[status];
+    if (!confirm(verb + ' this form?')) return;
+    btn.disabled = true;
+    hideMsg($('msg'));
+    const { error } = await db.from('requests').update({ status }).eq('id', r.id);
+    if (error) { btn.disabled = false; return showMsg($('msg'), friendlyError(error)); }
+    await refresh();
+    showMsg($('msg'), 'Saved: ' + describe(r) + ' → ' + STATUS_LABEL[status] + '.', 'ok');
+  }
+
+  async function remove(r, btn) {
+    if (!confirm('Delete this form for good? This cannot be undone.')) return;
+    btn.disabled = true;
+    const { error } = await db.from('requests').delete().eq('id', r.id);
+    if (error) { btn.disabled = false; return showMsg($('msg'), friendlyError(error)); }
+    await db.rpc('write_audit', { p_action: 'delete', p_table: 'requests', p_record: r.id, p_details: { type: r.type, so_no: r.so_no, item: r.item } });
+    await refresh();
+    showMsg($('msg'), 'Deleted.', 'ok');
+  }
+
+  function describe(r) {
+    return r.type === 'delivery' ? '🚚 Delivery · S/O ' + (r.so_no || '') : '📦 Reorder · ' + (r.item || '') + ' × ' + Number(r.qty || 0).toLocaleString();
+  }
+
+  function render() {
+    const type = $('fType').value;
+    const q = $('fSearch').value.trim().toLowerCase();
+    const base = ALL.filter((r) => (!type || r.type === type) &&
+      (!q || [r.so_no, r.item, r.note, nameOf(r.created_by)].join(' ').toLowerCase().includes(q)));
+    renderCounts(base);
+    let rows = statusFilter === 'all' ? base : base.filter((r) => r.status === statusFilter);
+    // Most urgent first: earliest "needed by" date
+    rows = rows.slice().sort((a, b) => (a.needed_date || '9999').localeCompare(b.needed_date || '9999') || a.created_at.localeCompare(b.created_at));
+
+    const list = $('list'); list.innerHTML = '';
+    if (!rows.length) {
+      const p = document.createElement('div'); p.className = 'card muted';
+      p.textContent = statusFilter === 'new' ? 'No forms waiting for approval. 👍' : 'No forms here.';
+      return list.appendChild(p);
+    }
+
+    rows.forEach((r) => {
+      const open = r.status === 'new' || r.status === 'approved';
+      const late = open && r.needed_date && r.needed_date < TODAY;
+      const div = document.createElement('div');
+      div.className = 'req' + (late ? ' late' : '');
+      div.innerHTML = '<div class="top"><div class="what"></div><div class="pills"></div></div><div class="meta"></div>';
+      div.querySelector('.what').textContent = describe(r);
+
+      const pills = div.querySelector('.pills');
+      const addPill = (text, cls) => { const s = document.createElement('span'); s.className = 'pill ' + cls; s.textContent = text; s.style.marginLeft = '4px'; pills.appendChild(s); };
+      if (late) addPill('LATE', 'p-late');
+      addPill(STATUS_LABEL[r.status] || r.status, 's-' + r.status);
+
+      let meta = 'From ' + nameOf(r.created_by) + ' · Sent ' + formatDate(r.created_at) + ' · Needed by ' + formatDate(r.needed_date);
+      if (r.handled_by) meta += ' · ' + (STATUS_LABEL[r.status] || r.status) + ' by ' + nameOf(r.handled_by) + ' on ' + formatDate(r.handled_at);
+      div.querySelector('.meta').textContent = meta;
+
+      // Facts from eFichain
+      const info = document.createElement('div'); info.className = 'info';
+      if (r.type === 'delivery') {
+        const s = SO_INFO[r.so_no];
+        if (s) {
+          const days = s.so_date ? daysBetween(s.so_date, TODAY) : 0;
+          const colour = days >= RULES.red ? 'p-red' : days >= RULES.orange ? 'p-orange' : '';
+          info.textContent = (s.customer || '') + ' · S/O date ' + formatDate(s.so_date) + ' · ' + s.lines + ' items · ' +
+            formatRM(s.amount) + ' · Ship status: ' + [...s.ship].join(', ') + ' · ';
+          const p = document.createElement('span'); p.className = 'pill ' + colour; p.textContent = days + ' days';
+          info.appendChild(p);
+        } else {
+          info.textContent = '⚠️ This S/O number is not in the uploaded eFichain data. Please check it is correct.';
+        }
+      } else {
+        const code = (r.item || '').split(/\s+/)[0];
+        info.textContent = ITEM_DESC[code] ? 'Item: ' + ITEM_DESC[code] : 'Item name not found in eFichain data (check the code).';
+      }
+      div.appendChild(info);
+
+      if (r.note) { const n = document.createElement('div'); n.className = 'note'; n.textContent = '💬 ' + r.note; div.appendChild(n); }
+
+      const actions = document.createElement('div'); actions.className = 'actions';
+      const addBtn = (label, cls, fn) => { const b = document.createElement('button'); b.type = 'button'; b.className = cls; b.textContent = label; b.addEventListener('click', () => fn(b)); actions.appendChild(b); };
+      if (r.status === 'new') {
+        addBtn('✔ Approve', 'b-approve', (b) => setStatus(r, 'approved', b));
+        addBtn('✖ Reject', 'b-reject', (b) => setStatus(r, 'rejected', b));
+      }
+      if (r.status === 'approved') addBtn('✔ Mark as done', 'b-done', (b) => setStatus(r, 'done', b));
+      if (ME.profile.role === 'owner') addBtn('Delete', 'b-delete', (b) => remove(r, b));
+      if (actions.children.length) div.appendChild(actions);
+
+      list.appendChild(div);
+    });
+  }
+
+  async function refresh() {
+    await loadAll();
+    render();
+  }
+
+  $('fType').addEventListener('input', render);
+  $('fSearch').addEventListener('input', render);
+
+  (async () => {
+    ME = await requireRole(['owner', 'manager']);
+    if (!ME) return;
+    renderTopbar(ME);
+    TODAY = malaysiaToday();
+    try {
+      await refresh();
+      $('loading').classList.add('hidden');
+      $('page').classList.remove('hidden');
+    } catch (err) {
+      $('loading').innerHTML = '';
+      const m = document.createElement('div'); $('loading').appendChild(m);
+      showMsg(m, friendlyError(err));
+    }
+  })();
+</script>
+</body>
+</html>
