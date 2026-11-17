@@ -15,6 +15,16 @@
     .menu { display:grid; gap:12px; grid-template-columns:repeat(auto-fit, minmax(200px, 1fr)); }
     .menu .item { border:1px dashed #cbd2d9; border-radius:10px; padding:16px; color:var(--muted); }
     .menu .item b { display:block; color:var(--text); margin-bottom:4px; }
+    .small { font-size:.85rem; }
+    .alerts-head { display:flex; justify-content:space-between; align-items:baseline; gap:8px; }
+    .alert { display:block; padding:10px 12px; border-radius:8px; margin-top:8px; text-decoration:none; color:var(--text); border-left:4px solid var(--line); background:#f8fafc; }
+    .alert.red { border-left-color:var(--red); background:var(--red-bg); }
+    .alert.orange { border-left-color:var(--orange); background:var(--orange-bg); }
+    .alert.green { border-left-color:var(--green); background:var(--green-bg); }
+    .alert.blue { border-left-color:var(--brand); background:#eff6ff; }
+    .alert b { display:block; }
+    .alert ol { margin:6px 0 0; padding-left:20px; font-size:.9rem; }
+    a.btn.wa { display:block; text-align:center; text-decoration:none; background:#16a34a; margin-top:14px; padding:12px; border-radius:8px; color:#fff; font-weight:600; }
     .menu .item.ready { border:1px solid var(--brand); text-decoration:none; background:#eff6ff; }
     .menu .item.ready b { color:var(--brand); }
   </style>
@@ -64,6 +74,12 @@
         <h1 id="hello">Hello</h1>
         <p class="muted" id="roleLine"></p>
         <div id="homeMsg" class="msg"></div>
+      </div>
+      <div class="card hidden" id="alertsCard">
+        <div class="alerts-head"><h2>🔔 Alerts</h2><span class="muted small" id="alertsDate"></span></div>
+        <div id="alerts"></div>
+        <a id="waBtn" class="btn wa hidden" target="_blank" rel="noopener">Share today's summary on WhatsApp</a>
+        <p class="muted small hidden" id="waHint">Opens WhatsApp with the message ready. You choose the group and press Send yourself.</p>
       </div>
       <div class="card" id="menuCard">
         <h2>Menu</h2>
@@ -170,6 +186,129 @@
       div.querySelector('span').textContent = desc;
       menu.appendChild(div);
     });
+
+    loadAlerts(me).catch((err) => {
+      $('alertsCard').classList.remove('hidden');
+      const m = document.createElement('div'); $('alerts').appendChild(m);
+      const notReady = /daily_summary|Could not find the function/i.test(String(err && err.message));
+      showMsg(m, notReady ? 'Alerts are not set up yet. Please ask the boss to run supabase/05_daily_summary.sql in Supabase.'
+                          : 'Cannot load alerts. ' + friendlyError(err));
+    });
+  }
+
+  // ---------------- Alerts ----------------
+  function malaysiaNow() {
+    const parts = Object.fromEntries(new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kuala_Lumpur', year: 'numeric', month: '2-digit',
+      day: '2-digit', hour: '2-digit', hourCycle: 'h23' }).formatToParts(new Date()).map((p) => [p.type, p.value]));
+    return { ymd: `${parts.year}-${parts.month}-${parts.day}`, hour: parseInt(parts.hour, 10) };
+  }
+  function addDays(ymd, n) { const d = new Date(ymd + 'T00:00:00Z'); d.setUTCDate(d.getUTCDate() + n); return d.toISOString().slice(0, 10); }
+
+  // kind: red / orange / green / blue. title: bold line. text: smaller line. href: optional link. list: optional numbered list.
+  function addAlert(kind, title, text, href, list) {
+    const el = document.createElement(href ? 'a' : 'div');
+    el.className = 'alert ' + kind;
+    if (href) el.href = href;
+    const b = document.createElement('b'); b.textContent = title; el.appendChild(b);
+    if (text) { const s = document.createElement('span'); s.className = 'small'; s.textContent = text; el.appendChild(s); }
+    if (list && list.length) {
+      const ol = document.createElement('ol');
+      list.forEach((t) => { const li = document.createElement('li'); li.textContent = t; ol.appendChild(li); });
+      el.appendChild(ol);
+    }
+    $('alerts').appendChild(el);
+  }
+
+  async function loadAlerts(me) {
+    const role = me.profile.role;
+    const isBoss = role === 'owner' || role === 'manager';
+    const now = malaysiaNow();
+    $('alerts').innerHTML = '';
+    $('alertsDate').textContent = formatDate(now.ymd);
+
+    const { data: hourRow } = await db.from('settings').select('value').eq('key', 'alert_hour').maybeSingle();
+    const alertHour = hourRow && /^\d+$/.test(hourRow.value) ? parseInt(hourRow.value, 10) : 8;
+    const hourText = alertHour === 12 ? '12:00 pm' : (alertHour % 12 || 12) + ':00 ' + (alertHour < 12 ? 'am' : 'pm');
+
+    let sum = null;
+    if (now.hour >= alertHour) {
+      const { data, error } = await db.rpc('daily_summary');
+      if (error) throw error;
+      sum = data;
+    }
+
+    const topList = sum ? (sum.top_oos || []).map((t) => `${t.item} ${t.desc || ''} — deleted ${t.times}×`.trim()) : [];
+
+    // 1. Daily summary (everyone)
+    if (!sum) {
+      addAlert('blue', 'Today\'s summary is ready at ' + hourText + '.', 'Come back after ' + hourText + ' to see red orders and out-of-stock items.');
+    } else {
+      addAlert(sum.red > 0 ? 'red' : 'green',
+        '🔴 ' + sum.red + ' red orders — not delivered for ' + sum.red_days + '+ days',
+        isBoss ? 'Arrange delivery today.' : 'Tell your manager if you can help with delivery.',
+        isBoss ? 'dashboard.html' : null);
+      if (sum.orange > 0) {
+        addAlert('orange', '🟠 ' + sum.orange + ' orange orders — ' + sum.orange_days + '–' + (sum.red_days - 1) + ' days',
+          'Deliver by tomorrow.', isBoss ? 'dashboard.html' : null);
+      }
+      if (isBoss && sum.pending_rm !== null && sum.pending_rm !== undefined) {
+        addAlert('blue', '💰 ' + formatRM(sum.pending_rm) + ' not delivered yet (' + sum.pending_orders + ' orders)', 'Send the biggest orders first.', 'dashboard.html');
+      }
+      if (topList.length) {
+        addAlert('red', '📦 Top ' + topList.length + ' out-of-stock items', 'Deleted at picking. Fill in a reorder form for these.',
+          isBoss ? 'dashboard.html' : 'request.html?type=reorder', topList);
+      }
+      if (isBoss) {
+        if (!sum.last_upload) {
+          addAlert('orange', '⚠️ No eFichain data uploaded yet', 'Upload the Excel so the numbers are correct.', 'upload.html');
+        } else {
+          const uploaded = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kuala_Lumpur' }).format(new Date(sum.last_upload));
+          if (uploaded < now.ymd) addAlert('orange', '⚠️ Data is old — last upload ' + formatDate(uploaded), 'Upload today\'s eFichain Excel so the numbers are correct.', 'upload.html');
+        }
+      }
+    }
+
+    // 2. Forms
+    if (isBoss) {
+      const { data: open } = await db.from('requests').select('status, needed_date').in('status', ['new', 'approved']);
+      const waiting = (open || []).filter((r) => r.status === 'new').length;
+      const late = (open || []).filter((r) => r.needed_date && r.needed_date < now.ymd).length;
+      if (waiting) addAlert('blue', '📝 ' + waiting + ' form' + (waiting > 1 ? 's' : '') + ' waiting for your approval', 'Approve or reject today.', 'handle.html');
+      if (late) addAlert('red', '⏰ ' + late + ' form' + (late > 1 ? 's are' : ' is') + ' LATE (past the needed date)', 'Please follow up now.', 'handle.html');
+      if (!waiting && !late) addAlert('green', '✅ No forms waiting', null, 'handle.html');
+    } else {
+      const since = addDays(now.ymd, -3);
+      const { data: mine } = await db.from('requests').select('type, so_no, item, qty, status, handled_at')
+        .eq('created_by', me.user.id).in('status', ['approved', 'rejected', 'done']).gte('handled_at', since)
+        .order('handled_at', { ascending: false });
+      const word = { approved: '✅ Approved', rejected: '❌ Rejected', done: '✔ Done' };
+      (mine || []).forEach((r) => {
+        const what = r.type === 'delivery' ? 'Delivery S/O ' + r.so_no : 'Reorder ' + r.item + ' × ' + Number(r.qty || 0);
+        addAlert(r.status === 'rejected' ? 'red' : 'green', word[r.status] + ': ' + what, 'Updated ' + formatDate(r.handled_at),
+          'request.html?type=' + r.type);
+      });
+      if (!mine || !mine.length) addAlert('green', 'No updates on your forms in the last 3 days.', null);
+    }
+
+    // 3. WhatsApp (managers and boss) — a person presses Send, nothing is sent automatically
+    if (isBoss && sum) {
+      const lines = [
+        '*YONGHUAT daily summary — ' + formatDate(now.ymd) + '*',
+        '🔴 Red (' + sum.red_days + '+ days not delivered): ' + sum.red + ' orders',
+        '🟠 Orange (' + sum.orange_days + '–' + (sum.red_days - 1) + ' days): ' + sum.orange + ' orders',
+        '💰 Not delivered: ' + formatRM(sum.pending_rm) + ' (' + sum.pending_orders + ' orders)'
+      ];
+      if (topList.length) {
+        lines.push('', '📦 Top ' + topList.length + ' out-of-stock (please reorder):');
+        topList.forEach((t, i) => lines.push((i + 1) + '. ' + t));
+      }
+      lines.push('', 'Check the system: ' + location.origin);
+      $('waBtn').href = 'https://wa.me/?text=' + encodeURIComponent(lines.join('\n'));
+      $('waBtn').classList.remove('hidden');
+      $('waHint').classList.remove('hidden');
+    }
+
+    $('alertsCard').classList.remove('hidden');
   }
 
   show().catch((err) => {
