@@ -1,0 +1,213 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Forms · YONGHUAT SYSTEM</title>
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <script src="config.js"></script>
+  <script src="app.js"></script>
+  <style>
+    .tabs { display:flex; gap:8px; margin:12px 0 16px; }
+    .tabs a { flex:1; text-align:center; padding:10px; border-radius:8px; border:1px solid #cbd2d9; background:#fff; color:var(--text); text-decoration:none; font-weight:600; }
+    .tabs a.active { background:var(--brand); color:#fff; border-color:var(--brand); }
+    .two { display:grid; gap:0 12px; grid-template-columns:repeat(auto-fit, minmax(180px, 1fr)); }
+    .hint { font-size:.85rem; color:var(--muted); margin-top:4px; }
+    .list { display:grid; gap:10px; }
+    .item { border:1px solid var(--line); border-radius:10px; padding:12px; }
+    .item .top { display:flex; justify-content:space-between; gap:8px; align-items:flex-start; }
+    .item .what { font-weight:700; }
+    .item .meta { font-size:.85rem; color:var(--muted); margin-top:4px; }
+    .item .note { font-size:.9rem; margin-top:6px; white-space:pre-line; }
+    .pill { display:inline-block; padding:2px 10px; border-radius:999px; font-size:.8rem; font-weight:700; white-space:nowrap; }
+    .s-new { background:#dbeafe; color:#1e40af; } .s-approved { background:var(--green-bg); color:var(--green); }
+    .s-rejected { background:var(--red-bg); color:var(--red); } .s-done { background:#e5e7eb; color:#374151; }
+    .s-cancelled { background:#f3f4f6; color:#6b7280; }
+    .cancel { margin-top:8px; font-size:.85rem; padding:6px 12px; }
+  </style>
+</head>
+<body>
+  <div class="wrap hidden" id="page">
+    <p><a href="index.html">← Back to menu</a></p>
+
+    <div class="tabs">
+      <a href="request.html?type=delivery" id="tabDelivery">Arrange delivery</a>
+      <a href="request.html?type=reorder" id="tabReorder">Need to reorder</a>
+    </div>
+
+    <div class="card">
+      <h1 id="formTitle"></h1>
+      <p class="muted" id="formIntro"></p>
+
+      <form id="form" novalidate>
+        <!-- Delivery -->
+        <div id="deliveryFields">
+          <label for="soNo">S/O number *</label>
+          <input id="soNo" type="text" autocomplete="off" placeholder="e.g. CJYH22011364" style="text-transform:uppercase">
+          <div class="hint">Copy it from eFichain. One form per sales order.</div>
+        </div>
+
+        <!-- Reorder -->
+        <div id="reorderFields">
+          <label for="item">Item code or name *</label>
+          <input id="item" type="text" autocomplete="off" placeholder="e.g. 70300100 COLOR NATURAL CREAM 1">
+          <label for="qty">Quantity needed (units) *</label>
+          <input id="qty" type="number" inputmode="decimal" min="0" step="any" placeholder="e.g. 24">
+        </div>
+
+        <div class="two">
+          <div>
+            <label for="neededDate" id="neededLabel">Needed by *</label>
+            <input id="neededDate" type="date">
+          </div>
+        </div>
+
+        <label for="note">Note</label>
+        <textarea id="note" rows="3" placeholder="Anything the manager should know"></textarea>
+
+        <button class="btn btn-full" type="submit" id="submitBtn">Send to manager</button>
+        <div id="msg" class="msg"></div>
+      </form>
+    </div>
+
+    <div class="card">
+      <h2>My forms</h2>
+      <p class="muted" id="myNote">Newest first. You can cancel a form while it is still waiting for approval.</p>
+      <div class="list" id="myList"></div>
+    </div>
+  </div>
+
+<script>
+  const $ = (id) => document.getElementById(id);
+  const TYPE = new URLSearchParams(location.search).get('type') === 'reorder' ? 'reorder' : 'delivery';
+  const STATUS_LABEL = { new: 'Waiting for approval', approved: 'Approved', rejected: 'Rejected', done: 'Done', cancelled: 'Cancelled' };
+  let ME = null;
+
+  function malaysiaToday() {
+    return new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kuala_Lumpur', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
+  }
+  function addDays(ymd, n) {
+    const d = new Date(ymd + 'T00:00:00Z'); d.setUTCDate(d.getUTCDate() + n);
+    return d.toISOString().slice(0, 10);
+  }
+
+  function setupForm() {
+    const isDelivery = TYPE === 'delivery';
+    document.title = (isDelivery ? 'Arrange delivery' : 'Need to reorder') + ' · YONGHUAT SYSTEM';
+    $('tabDelivery').classList.toggle('active', isDelivery);
+    $('tabReorder').classList.toggle('active', !isDelivery);
+    $('formTitle').textContent = isDelivery ? 'Arrange delivery' : 'Need to reorder';
+    $('formIntro').textContent = isDelivery
+      ? 'Ask the manager to arrange delivery for a sales order.'
+      : 'Tell the manager an item is out of stock and must be ordered.';
+    $('neededLabel').textContent = isDelivery ? 'Deliver by *' : 'Stock needed by *';
+    $('deliveryFields').classList.toggle('hidden', !isDelivery);
+    $('reorderFields').classList.toggle('hidden', isDelivery);
+    const today = malaysiaToday();
+    $('neededDate').min = today;
+    $('neededDate').value = addDays(today, 1);
+  }
+
+  function readForm() {
+    const today = malaysiaToday();
+    const r = {
+      type: TYPE,
+      so_no: null, item: null, qty: null,
+      needed_date: $('neededDate').value || null,
+      note: $('note').value.trim() || null,
+      created_by: ME.user.id
+    };
+    if (TYPE === 'delivery') {
+      r.so_no = $('soNo').value.trim().toUpperCase();
+      if (!r.so_no) return 'Please fill in the S/O number.';
+    } else {
+      r.item = $('item').value.trim();
+      const q = parseFloat($('qty').value);
+      if (!r.item) return 'Please fill in the item code or name.';
+      if (isNaN(q) || q <= 0) return 'Please fill in a quantity more than 0.';
+      r.qty = Math.round(q * 100) / 100;
+    }
+    if (!r.needed_date) return 'Please choose the date.';
+    if (r.needed_date < today) return 'The date cannot be in the past.';
+    return r;
+  }
+
+  $('form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    hideMsg($('msg'));
+    const r = readForm();
+    if (typeof r === 'string') return showMsg($('msg'), r);
+    const btn = $('submitBtn');
+    btn.disabled = true;
+    try {
+      const { error } = await db.from('requests').insert(r);
+      if (error) throw error;
+      $('soNo').value = ''; $('item').value = ''; $('qty').value = ''; $('note').value = '';
+      setupForm();
+      const what = TYPE === 'delivery' ? 'S/O ' + r.so_no : r.item + ' × ' + r.qty;
+      showMsg($('msg'), 'Sent! The manager will see your form (' + what + ').', 'ok');
+      await loadMine();
+    } catch (err) {
+      showMsg($('msg'), friendlyError(err));
+    } finally {
+      btn.disabled = false;
+    }
+  });
+
+  async function loadMine() {
+    const list = $('myList');
+    const { data, error } = await db.from('requests')
+      .select('id, created_at, type, so_no, item, qty, needed_date, note, status, handled_at')
+      .eq('created_by', ME.user.id)
+      .order('created_at', { ascending: false })
+      .limit(50);
+    list.innerHTML = '';
+    if (error) {
+      const m = document.createElement('div'); m.className = 'msg'; list.appendChild(m);
+      return showMsg(m, friendlyError(error));
+    }
+    if (!data.length) {
+      const p = document.createElement('p'); p.className = 'muted'; p.textContent = 'You have not sent any forms yet.';
+      return list.appendChild(p);
+    }
+    data.forEach((r) => {
+      const div = document.createElement('div');
+      div.className = 'item';
+      div.innerHTML = '<div class="top"><div class="what"></div><span class="pill"></span></div><div class="meta"></div><div class="note"></div>';
+      div.querySelector('.what').textContent = r.type === 'delivery'
+        ? '🚚 Delivery · S/O ' + (r.so_no || '')
+        : '📦 Reorder · ' + (r.item || '') + ' × ' + Number(r.qty || 0).toLocaleString();
+      const pill = div.querySelector('.pill');
+      pill.textContent = STATUS_LABEL[r.status] || r.status;
+      pill.classList.add('s-' + r.status);
+      div.querySelector('.meta').textContent = 'Sent ' + formatDate(r.created_at) +
+        ' · Needed by ' + formatDate(r.needed_date) +
+        (r.handled_at ? ' · Updated ' + formatDate(r.handled_at) : '');
+      div.querySelector('.note').textContent = r.note || '';
+      if (r.status === 'new') {
+        const b = document.createElement('button');
+        b.type = 'button'; b.className = 'btn-light cancel'; b.textContent = 'Cancel this form';
+        b.addEventListener('click', async () => {
+          if (!confirm('Cancel this form?')) return;
+          b.disabled = true;
+          const { error: err } = await db.from('requests').update({ status: 'cancelled' }).eq('id', r.id);
+          if (err) { b.disabled = false; return alert(friendlyError(err)); }
+          loadMine();
+        });
+        div.appendChild(b);
+      }
+      list.appendChild(div);
+    });
+  }
+
+  (async () => {
+    ME = await requireRole(['staff', 'manager', 'owner']);
+    if (!ME) return;
+    renderTopbar(ME);
+    setupForm();
+    $('page').classList.remove('hidden');
+    await loadMine();
+  })();
+</script>
+</body>
+</html>
