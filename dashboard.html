@@ -1,0 +1,313 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Dashboard · YONGHUAT SYSTEM</title>
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <script src="config.js"></script>
+  <script src="app.js"></script>
+  <style>
+    .kpis { display:grid; gap:12px; grid-template-columns:repeat(auto-fit, minmax(170px, 1fr)); margin-bottom:16px; }
+    .kpi { background:#fff; border-radius:12px; padding:14px; box-shadow:0 2px 10px rgba(0,0,0,.06); border-top:4px solid var(--line); }
+    .kpi.red { border-top-color:var(--red); } .kpi.orange { border-top-color:var(--orange); } .kpi.blue { border-top-color:var(--brand); }
+    .kpi .label { font-size:.85rem; color:var(--muted); }
+    .kpi .value { font-size:1.6rem; font-weight:700; margin:4px 0; }
+    .kpi .action { font-size:.85rem; font-weight:600; }
+    .kpi.red .value, .kpi.red .action { color:var(--red); }
+    .kpi.orange .value, .kpi.orange .action { color:var(--orange); }
+    .filters { display:grid; gap:8px 12px; grid-template-columns:repeat(auto-fit, minmax(150px, 1fr)); }
+    .filters label { margin:0 0 4px; font-size:.85rem; }
+    .row-between { display:flex; justify-content:space-between; align-items:center; gap:8px; flex-wrap:wrap; }
+    .table-wrap { overflow-x:auto; }
+    table { border-collapse:collapse; width:100%; font-size:.9rem; }
+    th, td { text-align:left; padding:8px; border-bottom:1px solid var(--line); white-space:nowrap; }
+    th { background:#f8fafc; position:sticky; top:0; }
+    td.num, th.num { text-align:right; }
+    tr.red td { background:var(--red-bg); } tr.orange td { background:var(--orange-bg); }
+    .pill { display:inline-block; padding:2px 8px; border-radius:999px; font-size:.8rem; font-weight:700; }
+    .pill.red { background:var(--red); color:#fff; } .pill.orange { background:var(--orange); color:#fff; } .pill.none { background:var(--line); }
+    .small { font-size:.85rem; }
+    .details td { background:#f8fafc !important; font-size:.85rem; white-space:normal; }
+    tr.clickable { cursor:pointer; }
+  </style>
+</head>
+<body>
+  <div class="wrap" id="loading"><p class="muted">Loading…</p></div>
+
+  <div class="wrap hidden" id="page">
+    <div class="row-between">
+      <p><a href="index.html">← Back to menu</a></p>
+      <p class="muted small" id="dataInfo"></p>
+    </div>
+    <h1>Dashboard</h1>
+    <p class="muted small" id="todayLine"></p>
+
+    <div class="kpis" id="kpis"></div>
+
+    <div class="card">
+      <div class="row-between"><h2>Filters</h2><button class="btn-light" type="button" id="clearBtn">Clear filters</button></div>
+      <div class="filters">
+        <div><label for="fFrom">S/O date from</label><input id="fFrom" type="date"></div>
+        <div><label for="fTo">S/O date to</label><input id="fTo" type="date"></div>
+        <div><label for="fCustomer">Customer</label><input id="fCustomer" type="search" placeholder="Type a name"></div>
+        <div><label for="fItem">Item</label><input id="fItem" type="search" placeholder="Code or description"></div>
+        <div><label for="fSalesman">Salesman</label><select id="fSalesman"><option value="">All</option></select></div>
+        <div><label for="fDivision">Division</label><select id="fDivision"><option value="">All</option></select></div>
+        <div><label for="fColour">Colour</label>
+          <select id="fColour"><option value="">All</option><option value="red">Red only</option><option value="orange">Orange only</option><option value="none">No colour</option></select></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2 id="oosTitle">Top 10 out-of-stock items</h2>
+      <p class="muted small" id="oosNote"></p>
+      <div class="table-wrap"><table id="oosTable"></table></div>
+    </div>
+
+    <div class="card">
+      <h2>Orders not yet delivered</h2>
+      <p class="muted small" id="ordersNote"></p>
+      <div class="table-wrap"><table id="ordersTable"></table></div>
+    </div>
+  </div>
+
+<script>
+  const $ = (id) => document.getElementById(id);
+  let ALL = [];        // so_lines rows we need
+  let RULES = {};
+  let openForms = 0;
+  let TODAY = '';
+
+  // Today's date in Malaysia, as yyyy-mm-dd
+  function malaysiaToday() {
+    return new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kuala_Lumpur', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
+  }
+  function daysBetween(fromYmd, toYmd) {
+    if (!fromYmd) return 0;
+    return Math.round((Date.parse(toYmd + 'T00:00:00Z') - Date.parse(fromYmd + 'T00:00:00Z')) / 86400000);
+  }
+  function addDays(ymd, n) {
+    const d = new Date(ymd + 'T00:00:00Z'); d.setUTCDate(d.getUTCDate() + n);
+    return d.toISOString().slice(0, 10);
+  }
+
+  async function loadSettings() {
+    const { data, error } = await db.from('settings').select('key, value');
+    if (error) throw error;
+    const s = Object.fromEntries(data.map((r) => [r.key, r.value]));
+    const num = (k, d) => { const n = parseInt(s[k], 10); return isNaN(n) ? d : n; };
+    RULES = {
+      red: num('red_days', 3),
+      orange: num('orange_days', 1),
+      topN: num('top_oos_count', 10),
+      lookback: num('oos_lookback_days', 30),
+      deleted: (s.deleted_status_text || 'DELETED').toUpperCase(),
+      delivered: (s.delivered_status_text || 'FULFILL').toUpperCase(),
+      exclude: (s.pending_exclude_so_status || 'VOID,DRAFT').toUpperCase().split(',').map((x) => x.trim()).filter(Boolean)
+    };
+  }
+
+  // Only load what the dashboard needs: not-delivered lines + recently deleted lines.
+  async function loadLines() {
+    const since = addDays(TODAY, -RULES.lookback);
+    const cols = 'so_no, customer, so_date, item, item_desc, amount, qty, order_status, delivery_status, line_status, salesman, division, upload_batch';
+    const out = [];
+    const PAGE = 1000;
+    for (let from = 0; ; from += PAGE) {
+      const { data, error } = await db.from('so_lines').select(cols)
+        .or(`delivery_status.neq.${RULES.delivered},and(line_status.eq.${RULES.deleted},so_date.gte.${since})`)
+        .order('id').range(from, from + PAGE - 1);
+      if (error) throw error;
+      out.push(...data);
+      if (data.length < PAGE) break;
+    }
+    return out;
+  }
+
+  async function loadOpenForms() {
+    const { count } = await db.from('requests').select('id', { count: 'exact', head: true }).eq('status', 'new');
+    return count || 0;
+  }
+
+  async function loadLastUpload() {
+    const { data } = await db.from('so_lines').select('upload_batch').order('upload_batch', { ascending: false }).limit(1);
+    return data && data[0] ? data[0].upload_batch : null;
+  }
+
+  function colourOf(days) {
+    if (days >= RULES.red) return 'red';
+    if (days >= RULES.orange) return 'orange';
+    return 'none';
+  }
+
+  function isPending(r) {
+    return (r.delivery_status || '').toUpperCase() !== RULES.delivered
+      && !RULES.exclude.includes((r.order_status || '').toUpperCase())
+      && (r.line_status || '').toUpperCase() !== RULES.deleted;
+  }
+
+  function getFilters() {
+    return {
+      from: $('fFrom').value, to: $('fTo').value,
+      customer: $('fCustomer').value.trim().toLowerCase(),
+      item: $('fItem').value.trim().toLowerCase(),
+      salesman: $('fSalesman').value, division: $('fDivision').value, colour: $('fColour').value
+    };
+  }
+
+  function matches(r, f) {
+    if (f.from && (!r.so_date || r.so_date < f.from)) return false;
+    if (f.to && (!r.so_date || r.so_date > f.to)) return false;
+    if (f.customer && !(r.customer || '').toLowerCase().includes(f.customer)) return false;
+    if (f.item && !((r.item || '') + ' ' + (r.item_desc || '')).toLowerCase().includes(f.item)) return false;
+    if (f.salesman && r.salesman !== f.salesman) return false;
+    if (f.division && r.division !== f.division) return false;
+    return true;
+  }
+
+  function fillSelect(id, values) {
+    const sel = $(id);
+    [...new Set(values.filter(Boolean))].sort().forEach((v) => {
+      const o = document.createElement('option'); o.value = v; o.textContent = v; sel.appendChild(o);
+    });
+  }
+
+  function cell(row, text, cls) { const c = row.insertCell(); c.textContent = text; if (cls) c.className = cls; return c; }
+  function headRow(table, cols) {
+    const tr = table.createTHead().insertRow();
+    cols.forEach(([t, cls]) => { const th = document.createElement('th'); th.textContent = t; if (cls) th.className = cls; tr.appendChild(th); });
+  }
+
+  function render() {
+    const f = getFilters();
+    const rows = ALL.filter((r) => matches(r, f));
+
+    // ---- Orders not yet delivered (grouped by S/O) ----
+    const orders = new Map();
+    rows.filter(isPending).forEach((r) => {
+      let o = orders.get(r.so_no);
+      if (!o) {
+        o = { so_no: r.so_no, customer: r.customer, so_date: r.so_date, salesman: r.salesman, division: r.division,
+              order_status: r.order_status, ship: new Set(), lines: [], amount: 0 };
+        orders.set(r.so_no, o);
+      }
+      if (r.so_date && (!o.so_date || r.so_date < o.so_date)) o.so_date = r.so_date;
+      o.ship.add(r.delivery_status);
+      o.lines.push(r);
+      o.amount += Number(r.amount || 0);
+    });
+    let list = [...orders.values()].map((o) => {
+      o.days = daysBetween(o.so_date, TODAY);
+      o.colour = colourOf(o.days);
+      return o;
+    });
+    if (f.colour) list = list.filter((o) => o.colour === f.colour);
+    list.sort((a, b) => b.days - a.days || b.amount - a.amount);
+
+    const red = list.filter((o) => o.colour === 'red');
+    const orange = list.filter((o) => o.colour === 'orange');
+    const pendingRM = list.reduce((s, o) => s + o.amount, 0);
+
+    // ---- Top N out-of-stock (deleted at picking) ----
+    const since = addDays(TODAY, -RULES.lookback);
+    const oosMap = new Map();
+    rows.filter((r) => (r.line_status || '').toUpperCase() === RULES.deleted && r.so_date && r.so_date >= since).forEach((r) => {
+      let it = oosMap.get(r.item);
+      if (!it) { it = { item: r.item, desc: r.item_desc, times: 0, qty: 0, rm: 0, last: r.so_date }; oosMap.set(r.item, it); }
+      it.times += 1; it.qty += Number(r.qty || 0); it.rm += Number(r.amount || 0);
+      if (r.so_date > it.last) it.last = r.so_date;
+    });
+    const oosAll = [...oosMap.values()].sort((a, b) => b.times - a.times || b.rm - a.rm);
+    const oos = oosAll.slice(0, RULES.topN);
+
+    // ---- KPI cards ----
+    const kpis = [
+      ['red', 'Red orders (' + RULES.red + '+ days not delivered)', red.length.toLocaleString(), 'Arrange delivery TODAY'],
+      ['orange', 'Orange orders (' + RULES.orange + '–' + (RULES.red - 1) + ' days)', orange.length.toLocaleString(), 'Deliver by tomorrow'],
+      ['blue', 'Not delivered — total amount', formatRM(pendingRM), 'Send the biggest orders first'],
+      ['red', 'Out-of-stock items (last ' + RULES.lookback + ' days)', oosAll.length.toLocaleString(), 'Fill in reorder for the Top ' + RULES.topN],
+      ['blue', 'Forms waiting for approval', openForms.toLocaleString(), 'Approve or reject today']
+    ];
+    $('kpis').innerHTML = '';
+    kpis.forEach(([cls, label, value, action]) => {
+      const d = document.createElement('div');
+      d.className = 'kpi ' + cls;
+      d.innerHTML = '<div class="label"></div><div class="value"></div><div class="action"></div>';
+      d.querySelector('.label').textContent = label;
+      d.querySelector('.value').textContent = value;
+      d.querySelector('.action').textContent = '→ ' + action;
+      $('kpis').appendChild(d);
+    });
+
+    // ---- Top N table ----
+    $('oosTitle').textContent = 'Top ' + RULES.topN + ' out-of-stock items';
+    $('oosNote').textContent = 'Items deleted from sales orders at picking, ' + formatDate(since) + ' – ' + formatDate(TODAY) + '. Most often first.';
+    const ot = $('oosTable'); ot.innerHTML = '';
+    headRow(ot, [['#'], ['Item'], ['Description'], ['Times deleted', 'num'], ['Qty lost', 'num'], ['Sales lost', 'num'], ['Last time']]);
+    const ob = ot.createTBody();
+    if (!oos.length) { const r = ob.insertRow(); const c = cell(r, 'No out-of-stock items. 👍'); c.colSpan = 7; }
+    oos.forEach((it, i) => {
+      const r = ob.insertRow(); r.className = 'red';
+      cell(r, i + 1); cell(r, it.item); cell(r, it.desc || '');
+      cell(r, it.times, 'num'); cell(r, it.qty.toLocaleString(), 'num'); cell(r, formatRM(it.rm), 'num'); cell(r, formatDate(it.last));
+    });
+
+    // ---- Orders table ----
+    $('ordersNote').textContent = list.length.toLocaleString() + ' orders · not counting ' + RULES.exclude.join(' / ') +
+      ' orders or deleted items · days counted from S/O date (weekends and holidays included) · tap an order to see items';
+    const t = $('ordersTable'); t.innerHTML = '';
+    headRow(t, [['Days', 'num'], ['S/O'], ['S/O date'], ['Customer'], ['Salesman'], ['Items', 'num'], ['Amount', 'num'], ['S/O status'], ['Ship status']]);
+    const tb = t.createTBody();
+    if (!list.length) { const r = tb.insertRow(); const c = cell(r, 'Nothing waiting for delivery. 👍'); c.colSpan = 9; }
+    list.forEach((o) => {
+      const r = tb.insertRow(); r.className = o.colour + ' clickable';
+      const dc = r.insertCell(); dc.className = 'num';
+      const pill = document.createElement('span'); pill.className = 'pill ' + o.colour; pill.textContent = o.days; dc.appendChild(pill);
+      cell(r, o.so_no); cell(r, formatDate(o.so_date)); cell(r, o.customer || ''); cell(r, o.salesman || '');
+      cell(r, o.lines.length, 'num'); cell(r, formatRM(o.amount), 'num'); cell(r, o.order_status || ''); cell(r, [...o.ship].join(', '));
+      r.addEventListener('click', () => {
+        const next = r.nextElementSibling;
+        if (next && next.classList.contains('details')) { next.remove(); return; }
+        const d = tb.insertRow(r.sectionRowIndex + 1); d.className = 'details';
+        const c = d.insertCell(); c.colSpan = 9;
+        c.textContent = o.lines.map((l) => `${l.item} ${l.item_desc || ''} — qty ${Number(l.qty || 0)} — ${formatRM(l.amount)}`).join('\n');
+        c.style.whiteSpace = 'pre-line';
+      });
+    });
+  }
+
+  ['fFrom', 'fTo', 'fCustomer', 'fItem', 'fSalesman', 'fDivision', 'fColour'].forEach((id) => {
+    $(id).addEventListener('input', render);
+  });
+  $('clearBtn').addEventListener('click', () => {
+    ['fFrom', 'fTo', 'fCustomer', 'fItem', 'fSalesman', 'fDivision', 'fColour'].forEach((id) => { $(id).value = ''; });
+    render();
+  });
+
+  (async () => {
+    const me = await requireRole(['owner', 'manager']);
+    if (!me) return;
+    renderTopbar(me);
+    try {
+      TODAY = malaysiaToday();
+      await loadSettings();
+      const [lines, forms, last] = await Promise.all([loadLines(), loadOpenForms(), loadLastUpload()]);
+      ALL = lines; openForms = forms;
+      fillSelect('fSalesman', ALL.map((r) => r.salesman));
+      fillSelect('fDivision', ALL.map((r) => r.division));
+      $('todayLine').textContent = 'Today: ' + formatDate(TODAY);
+      $('dataInfo').textContent = last ? 'Data last uploaded: ' + formatDate(last) + ' ' +
+        new Date(last).toLocaleTimeString('en-MY', { hour: 'numeric', minute: '2-digit', timeZone: 'Asia/Kuala_Lumpur' }) : 'No data uploaded yet';
+      render();
+      $('loading').classList.add('hidden');
+      $('page').classList.remove('hidden');
+    } catch (err) {
+      $('loading').innerHTML = '';
+      const m = document.createElement('div'); m.className = 'msg'; $('loading').appendChild(m);
+      showMsg(m, friendlyError(err));
+    }
+  })();
+</script>
+</body>
+</html>
