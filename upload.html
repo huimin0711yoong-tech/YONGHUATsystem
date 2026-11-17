@@ -118,11 +118,23 @@
     return [...byKey.values()];
   }
 
+  // Status words come from the settings table (never hard-coded).
+  let RULES = { deleted: 'DELETED', delivered: 'FULFILL', exclude: ['VOID', 'DRAFT'] };
+  async function loadRules() {
+    const { data } = await db.from('settings').select('key, value')
+      .in('key', ['deleted_status_text', 'delivered_status_text', 'pending_exclude_so_status']);
+    const s = Object.fromEntries((data || []).map((r) => [r.key, r.value]));
+    if (s.deleted_status_text) RULES.deleted = s.deleted_status_text.toUpperCase();
+    if (s.delivered_status_text) RULES.delivered = s.delivered_status_text.toUpperCase();
+    if (s.pending_exclude_so_status) RULES.exclude = s.pending_exclude_so_status.toUpperCase().split(',').map((x) => x.trim()).filter(Boolean);
+  }
+
   function showPreview(rows) {
     const dates = rows.map((r) => r.so_date).filter(Boolean).sort();
     const orders = new Set(rows.map((r) => r.so_no)).size;
-    const deleted = rows.filter((r) => r.line_status === 'DELETED').length;
-    const notDelivered = rows.filter((r) => r.delivery_status !== 'FULFILL' && r.order_status !== 'VOID' && r.line_status !== 'DELETED').length;
+    const deleted = rows.filter((r) => r.line_status === RULES.deleted).length;
+    const notDelivered = rows.filter((r) => r.delivery_status !== RULES.delivered
+      && !RULES.exclude.includes(r.order_status) && r.line_status !== RULES.deleted).length;
     const total = rows.reduce((s, r) => s + r.amount, 0);
 
     const stats = [
@@ -130,7 +142,7 @@
       ['Sales orders', orders.toLocaleString()],
       ['Dates', dates.length ? formatDate(dates[0]) + ' – ' + formatDate(dates[dates.length - 1]) : '-'],
       ['Total S/O amount', formatRM(total)],
-      ['Not yet delivered (lines)', notDelivered.toLocaleString()],
+      ['Not yet delivered (lines, not counting ' + RULES.exclude.join(' / ') + ')', notDelivered.toLocaleString()],
       ['Deleted at picking (lines)', deleted.toLocaleString()]
     ];
     $('stats').innerHTML = '';
@@ -226,6 +238,7 @@
     const me = await requireRole(['owner', 'manager']);
     if (!me) return;
     renderTopbar(me);
+    await loadRules();
     $('page').classList.remove('hidden');
   })();
 </script>

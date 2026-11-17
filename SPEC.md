@@ -149,7 +149,7 @@
 
 ## 老板已确认（17 Nov 2026）
 1. eFichain Excel 有 sales order 号码和客户名。
-2. 被删的货品：eFichain 的 **STATUS** 栏 = "DELETED"（只在 S/O STATUS = PICKING 时出现）。未送货 = SHIP STATUS 不是 "FULFILL"，不算 VOID 的单和 DELETED 的货。这些字放在 settings，可以改。
+2. 被删的货品：eFichain 的 **STATUS** 栏 = "DELETED"（只在 S/O STATUS = PICKING 时出现）。未送货 = SHIP STATUS 不是 "FULFILL"，不算 VOID 和 DRAFT（草稿）的单，也不算 DELETED 的货。这些字放在 settings，可以改。
 3. 员工填送货表格时自己打 SO 号码。
 4. 送货 / 订货表格要经理批准。
 5. 0 天不显示颜色；Top 10 只算最近 30 天；星期六、日、公共假期都算天数。
