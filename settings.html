@@ -1,0 +1,232 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Settings · YONGHUAT SYSTEM</title>
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <script src="config.js"></script>
+  <script src="app.js"></script>
+  <style>
+    .small { font-size:.85rem; }
+    .grid { display:grid; gap:0 16px; grid-template-columns:repeat(auto-fit, minmax(220px, 1fr)); }
+    .hint { font-size:.85rem; color:var(--muted); margin-top:4px; }
+    .preview { margin-top:14px; padding:10px 12px; border-radius:8px; background:#f8fafc; font-size:.92rem; line-height:1.7; }
+    .dot { display:inline-block; width:12px; height:12px; border-radius:50%; vertical-align:middle; margin-right:6px; }
+    .changed input, .changed select { border-color:var(--brand); background:#eff6ff; }
+    .bar { position:sticky; bottom:0; background:var(--bg); padding:12px 0; }
+    .log div { padding:6px 0; border-bottom:1px solid var(--line); font-size:.88rem; }
+  </style>
+</head>
+<body>
+  <div class="wrap" id="loading"><p class="muted">Loading…</p></div>
+
+  <div class="wrap hidden" id="page">
+    <p><a href="index.html">← Back to menu</a></p>
+    <h1>Settings</h1>
+    <p class="muted">The rule numbers used by the Dashboard and Alerts. Only the boss can change them. Changes work for everyone straight away.</p>
+
+    <form id="form" novalidate>
+      <div class="card">
+        <h2>🚚 Delivery colours</h2>
+        <div class="grid">
+          <div data-key="red_days">
+            <label for="red_days">🔴 Red from (days not delivered)</label>
+            <input id="red_days" type="number" min="1" max="60" step="1" inputmode="numeric">
+          </div>
+          <div data-key="orange_days">
+            <label for="orange_days">🟠 Orange from (days not delivered)</label>
+            <input id="orange_days" type="number" min="0" max="59" step="1" inputmode="numeric">
+            <div class="hint">Must be smaller than the red number.</div>
+          </div>
+        </div>
+        <div class="preview" id="colourPreview"></div>
+      </div>
+
+      <div class="card">
+        <h2>📦 Out-of-stock list</h2>
+        <div class="grid">
+          <div data-key="top_oos_count">
+            <label for="top_oos_count">How many items to show (Top …)</label>
+            <input id="top_oos_count" type="number" min="1" max="50" step="1" inputmode="numeric">
+          </div>
+          <div data-key="oos_lookback_days">
+            <label for="oos_lookback_days">Count the last … days</label>
+            <input id="oos_lookback_days" type="number" min="1" max="365" step="1" inputmode="numeric">
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>🔔 Daily alert</h2>
+        <div class="grid">
+          <div data-key="alert_hour">
+            <label for="alert_hour">Show today's summary from</label>
+            <select id="alert_hour"></select>
+            <div class="hint">Malaysia time.</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>🧾 eFichain words</h2>
+        <p class="muted small">Only change these if eFichain changes the words in its Excel export.</p>
+        <div class="grid">
+          <div data-key="delivered_status_text">
+            <label for="delivered_status_text">SHIP STATUS that means delivered</label>
+            <input id="delivered_status_text" type="text" autocomplete="off" style="text-transform:uppercase">
+          </div>
+          <div data-key="deleted_status_text">
+            <label for="deleted_status_text">Item STATUS that means deleted at picking</label>
+            <input id="deleted_status_text" type="text" autocomplete="off" style="text-transform:uppercase">
+          </div>
+          <div data-key="pending_exclude_so_status">
+            <label for="pending_exclude_so_status">S/O STATUS not counted as "not delivered"</label>
+            <input id="pending_exclude_so_status" type="text" autocomplete="off" style="text-transform:uppercase">
+            <div class="hint">Separate with commas, e.g. VOID,DRAFT</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="bar">
+        <button class="btn btn-full" type="submit" id="saveBtn" disabled>Save changes</button>
+        <div id="msg" class="msg"></div>
+      </div>
+    </form>
+
+    <div class="card">
+      <h2>Recent changes</h2>
+      <div class="log" id="log"></div>
+    </div>
+  </div>
+
+<script>
+  const $ = (id) => document.getElementById(id);
+  const NUM_KEYS = { red_days: [1, 60], orange_days: [0, 59], top_oos_count: [1, 50], oos_lookback_days: [1, 365], alert_hour: [0, 23] };
+  const TEXT_KEYS = ['delivered_status_text', 'deleted_status_text', 'pending_exclude_so_status'];
+  const ALL_KEYS = Object.keys(NUM_KEYS).concat(TEXT_KEYS);
+  const LABEL = {
+    red_days: 'Red from (days)', orange_days: 'Orange from (days)', top_oos_count: 'Top out-of-stock count',
+    oos_lookback_days: 'Out-of-stock: last days', alert_hour: 'Daily alert time',
+    delivered_status_text: 'Delivered word', deleted_status_text: 'Deleted word', pending_exclude_so_status: 'Not counted S/O status'
+  };
+  let ME = null, SAVED = {};
+
+  function hourText(h) { h = Number(h); return h === 0 ? '12:00 am (midnight)' : h === 12 ? '12:00 pm (noon)' : (h % 12) + ':00 ' + (h < 12 ? 'am' : 'pm'); }
+  (function fillHours() {
+    for (let h = 0; h < 24; h++) { const o = document.createElement('option'); o.value = String(h); o.textContent = hourText(h); $('alert_hour').appendChild(o); }
+  })();
+
+  function cleanText(key, v) {
+    v = String(v || '').trim().toUpperCase();
+    if (key === 'pending_exclude_so_status') v = v.split(',').map((x) => x.trim()).filter(Boolean).join(',');
+    return v;
+  }
+  function current() {
+    const out = {};
+    ALL_KEYS.forEach((k) => { out[k] = NUM_KEYS[k] ? String($(k).value).trim() : cleanText(k, $(k).value); });
+    return out;
+  }
+  function changedKeys() { const c = current(); return ALL_KEYS.filter((k) => c[k] !== SAVED[k]); }
+
+  function validate(c) {
+    for (const [k, [min, max]] of Object.entries(NUM_KEYS)) {
+      if (!/^\d+$/.test(c[k])) return LABEL[k] + ': please enter a whole number.';
+      const n = parseInt(c[k], 10);
+      if (n < min || n > max) return LABEL[k] + ': must be between ' + min + ' and ' + max + '.';
+    }
+    if (parseInt(c.orange_days, 10) >= parseInt(c.red_days, 10)) return 'Orange must start before red (orange number must be smaller than red).';
+    for (const k of ['delivered_status_text', 'deleted_status_text']) if (!c[k]) return LABEL[k] + ': cannot be empty.';
+    return null;
+  }
+
+  function refreshUI() {
+    const c = current();
+    const changed = changedKeys();
+    document.querySelectorAll('[data-key]').forEach((el) => el.classList.toggle('changed', changed.includes(el.dataset.key)));
+    $('saveBtn').disabled = !changed.length;
+    $('saveBtn').textContent = changed.length ? 'Save ' + changed.length + ' change' + (changed.length > 1 ? 's' : '') : 'No changes';
+    const red = parseInt(c.red_days, 10), orange = parseInt(c.orange_days, 10);
+    const p = $('colourPreview');
+    if (isNaN(red) || isNaN(orange) || orange >= red) { p.textContent = '⚠️ Orange number must be smaller than red.'; return; }
+    p.innerHTML = '';
+    const line = (color, text) => { const d = document.createElement('div'); const s = document.createElement('span'); s.className = 'dot'; s.style.background = color; d.appendChild(s); d.appendChild(document.createTextNode(text)); p.appendChild(d); };
+    line('var(--red)', 'Red: ' + red + ' days or more not delivered');
+    line('var(--orange)', red - 1 === orange ? 'Orange: ' + orange + ' day' + (orange === 1 ? '' : 's') : 'Orange: ' + orange + '–' + (red - 1) + ' days');
+    if (orange > 0) line('#cbd2d9', 'No colour: ' + (orange === 1 ? '0 days (today\'s orders)' : '0–' + (orange - 1) + ' days'));
+  }
+
+  async function load() {
+    const [{ data, error }, { data: log }] = await Promise.all([
+      db.from('settings').select('key, value').in('key', ALL_KEYS),
+      db.from('audit_log').select('created_at, who_email, record_id, details').eq('action', 'settings change').order('created_at', { ascending: false }).limit(20)
+    ]);
+    if (error) throw error;
+    const defaults = { red_days: '3', orange_days: '1', top_oos_count: '10', oos_lookback_days: '30', alert_hour: '8',
+                       delivered_status_text: 'FULFILL', deleted_status_text: 'DELETED', pending_exclude_so_status: 'VOID,DRAFT' };
+    SAVED = { ...defaults };
+    (data || []).forEach((r) => { SAVED[r.key] = NUM_KEYS[r.key] ? String(r.value).trim() : cleanText(r.key, r.value); });
+    ALL_KEYS.forEach((k) => { $(k).value = SAVED[k]; });
+    refreshUI();
+    const box = $('log'); box.innerHTML = '';
+    if (!log || !log.length) { box.textContent = 'No changes yet.'; return; }
+    log.forEach((r) => {
+      const d = r.details || {};
+      const show = (k, v) => k === 'alert_hour' ? hourText(v) : v;
+      const div = document.createElement('div');
+      div.textContent = formatDate(r.created_at) + ' · ' + (LABEL[r.record_id] || r.record_id) + ': ' + show(r.record_id, d.old) + ' → ' +
+        show(r.record_id, d.new) + ' · by ' + (r.who_email || '');
+      box.appendChild(div);
+    });
+  }
+
+  $('form').addEventListener('input', () => { hideMsg($('msg')); refreshUI(); });
+
+  $('form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    hideMsg($('msg'));
+    const c = current();
+    const problem = validate(c);
+    if (problem) return showMsg($('msg'), problem);
+    const keys = changedKeys();
+    if (!keys.length) return;
+    if (!confirm('Save these changes?\n\n' + keys.map((k) => '• ' + LABEL[k] + ': ' + SAVED[k] + ' → ' + c[k]).join('\n') +
+                 '\n\nThe Dashboard and Alerts will use the new numbers for everyone.')) return;
+    const btn = $('saveBtn'); btn.disabled = true;
+    try {
+      for (const k of keys) {
+        const { data, error } = await db.from('settings')
+          .update({ value: c[k], updated_at: new Date().toISOString(), updated_by: ME.user.id })
+          .eq('key', k).select('key');
+        if (error) throw error;
+        if (!data || !data.length) {
+          const { error: insErr } = await db.from('settings').insert({ key: k, value: c[k] });
+          if (insErr) throw insErr;
+        }
+        await db.rpc('write_audit', { p_action: 'settings change', p_table: 'settings', p_record: k, p_details: { old: SAVED[k], new: c[k] } });
+      }
+      await load();
+      showMsg($('msg'), 'Saved ' + keys.length + ' change' + (keys.length > 1 ? 's' : '') + '. Everyone will see the new rules when they refresh.', 'ok');
+    } catch (err) {
+      showMsg($('msg'), friendlyError(err));
+      refreshUI();
+    }
+  });
+
+  (async () => {
+    ME = await requireRole(['owner']);
+    if (!ME) return;
+    renderTopbar(ME);
+    try {
+      await load();
+      $('loading').classList.add('hidden');
+      $('page').classList.remove('hidden');
+    } catch (err) {
+      $('loading').innerHTML = '';
+      const m = document.createElement('div'); $('loading').appendChild(m);
+      showMsg(m, friendlyError(err));
+    }
+  })();
+</script>
+</body>
+</html>
