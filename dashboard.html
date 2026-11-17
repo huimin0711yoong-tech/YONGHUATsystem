@@ -30,6 +30,17 @@
     .small { font-size:.85rem; }
     .details td { background:#f8fafc !important; font-size:.85rem; white-space:normal; }
     tr.clickable { cursor:pointer; }
+    .steps { margin:0 0 8px; padding-left:20px; font-size:.92rem; }
+    .steps li { margin-bottom:4px; }
+    .ai-row { display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-top:10px; }
+    .ai-row select { width:auto; }
+    .ai-row a.btn-light { text-decoration:none; padding:10px 16px; border-radius:8px; border:1px solid #cbd2d9; color:var(--text); display:inline-block; }
+    textarea.prompt { font-family:ui-monospace,Consolas,monospace; font-size:.8rem; background:#f8fafc; }
+    .check { display:flex; gap:10px; align-items:flex-start; margin-top:12px; font-weight:600; }
+    .check input { width:auto; margin-top:3px; transform:scale(1.3); }
+    .brief { border:1px solid var(--line); border-radius:10px; padding:10px 12px; margin-top:8px; }
+    .brief summary { cursor:pointer; font-weight:600; }
+    .brief pre { white-space:pre-wrap; font-family:inherit; font-size:.92rem; margin:8px 0 0; }
   </style>
 </head>
 <body>
@@ -70,6 +81,39 @@
       <p class="muted small" id="ordersNote"></p>
       <div class="table-wrap"><table id="ordersTable"></table></div>
     </div>
+
+    <div class="card" id="aiCard">
+      <h2>🤖 AI morning brief</h2>
+      <ol class="steps">
+        <li>Set the filters above (optional), then click <b>Make prompt</b>. It uses only what you see on this page.</li>
+        <li>Click <b>Copy prompt</b>, open Claude, paste it and send.</li>
+        <li>Copy Claude's answer and paste it in the box below.</li>
+        <li><b>Read it and check it against the numbers above.</b> Tick the box, then save.</li>
+      </ol>
+      <p class="muted small">The system never sends anything to AI by itself. The prompt includes customer names and amounts — only paste it into your company's Claude account.</p>
+      <div class="ai-row">
+        <label for="aiLang" style="margin:0">Answer in</label>
+        <select id="aiLang"><option value="English">English</option><option value="Simplified Chinese (简体中文)">中文</option><option value="Bahasa Malaysia">Bahasa Malaysia</option></select>
+        <button class="btn" type="button" id="makePromptBtn">Make prompt</button>
+      </div>
+      <div id="promptBox" class="hidden">
+        <label for="aiPrompt">Prompt</label>
+        <textarea id="aiPrompt" class="prompt" rows="10" readonly></textarea>
+        <div class="ai-row">
+          <button class="btn" type="button" id="copyBtn">Copy prompt</button>
+          <a class="btn-light" href="https://claude.ai/new" target="_blank" rel="noopener">Open Claude ↗</a>
+          <span class="muted small" id="copyMsg"></span>
+        </div>
+        <label for="aiAnswer">Claude's answer (paste here)</label>
+        <textarea id="aiAnswer" rows="8" placeholder="Paste the answer from Claude here"></textarea>
+        <label class="check"><input type="checkbox" id="aiChecked"> I have checked this answer against the numbers on this page.</label>
+        <button class="btn btn-full" type="button" id="saveBriefBtn" disabled>Save brief</button>
+        <div id="aiMsg" class="msg"></div>
+      </div>
+
+      <h2 style="margin-top:20px">Saved briefs</h2>
+      <div id="briefs"></div>
+    </div>
   </div>
 
 <script>
@@ -78,6 +122,8 @@
   let RULES = {};
   let openForms = 0;
   let TODAY = '';
+  let LAST = null;     // what the page is showing now (used by the AI brief)
+  let ME = null, PEOPLE = {};
 
   // Today's date in Malaysia, as yyyy-mm-dd
   function malaysiaToday() {
@@ -240,6 +286,8 @@
       $('kpis').appendChild(d);
     });
 
+    LAST = { f, list, red, orange, pendingRM, oos, oosAll, since };
+
     // ---- Top N table ----
     $('oosTitle').textContent = 'Top ' + RULES.topN + ' out-of-stock items';
     $('oosNote').textContent = 'Items deleted from sales orders at picking, ' + formatDate(since) + ' – ' + formatDate(TODAY) + '. Most often first.';
@@ -280,6 +328,126 @@
   ['fFrom', 'fTo', 'fCustomer', 'fItem', 'fSalesman', 'fDivision', 'fColour'].forEach((id) => {
     $(id).addEventListener('input', render);
   });
+
+  // ---------------- AI morning brief ----------------
+  const MAX_ORDERS_IN_PROMPT = 40;
+
+  function describeFilters(f) {
+    const parts = [];
+    if (f.from || f.to) parts.push('S/O date ' + (f.from ? formatDate(f.from) : 'start') + ' to ' + (f.to ? formatDate(f.to) : 'today'));
+    if (f.customer) parts.push('customer contains "' + f.customer + '"');
+    if (f.item) parts.push('item contains "' + f.item + '"');
+    if (f.salesman) parts.push('salesman ' + f.salesman);
+    if (f.division) parts.push('division ' + f.division);
+    if (f.colour) parts.push('colour ' + f.colour);
+    return parts.length ? parts.join(', ') : 'none (all data)';
+  }
+
+  function buildPrompt() {
+    const L = LAST;
+    const lang = $('aiLang').value;
+    const out = [];
+    out.push('You are helping the managers of YONGHUAT MARKETING SDN BHD (a distributor in Malaysia) plan today\'s deliveries and reorders.');
+    out.push('Today is ' + formatDate(TODAY) + '. Data comes from our eFichain sales fulfillment report' +
+      ($('dataInfo').textContent ? ' (' + $('dataInfo').textContent.toLowerCase() + ')' : '') + '.');
+    out.push('');
+    out.push('RULES');
+    out.push('- "Days" = days since the sales order date, weekends and holidays included.');
+    out.push('- RED = not delivered for ' + RULES.red + ' days or more. ORANGE = ' + RULES.orange + ' to ' + (RULES.red - 1) + ' days.');
+    out.push('- Not counted as "not delivered": ' + RULES.exclude.join(', ') + ' orders, and items deleted at picking.');
+    out.push('- Out-of-stock = items deleted from sales orders at picking, last ' + RULES.lookback + ' days.');
+    out.push('- Filters used on the dashboard: ' + describeFilters(L.f) + '.');
+    out.push('');
+    out.push('SUMMARY');
+    out.push('- Red orders: ' + L.red.length);
+    out.push('- Orange orders: ' + L.orange.length);
+    out.push('- Orders not delivered: ' + L.list.length + ', total ' + formatRM(L.pendingRM));
+    out.push('- Out-of-stock items: ' + L.oosAll.length);
+    out.push('- Staff forms waiting for approval: ' + openForms);
+    out.push('');
+    const shown = L.list.slice(0, MAX_ORDERS_IN_PROMPT);
+    out.push('MOST URGENT ORDERS NOT DELIVERED (' + shown.length + ' of ' + L.list.length + ', oldest first)');
+    out.push('S/O | Customer | Salesman | S/O date | Days | Colour | Items | Amount');
+    shown.forEach((o) => out.push([o.so_no, o.customer || '-', o.salesman || '-', formatDate(o.so_date), o.days,
+      o.colour === 'none' ? '-' : o.colour.toUpperCase(), o.lines.length, formatRM(o.amount)].join(' | ')));
+    if (!shown.length) out.push('(none)');
+    out.push('');
+    out.push('TOP ' + L.oos.length + ' OUT-OF-STOCK ITEMS (most often deleted first)');
+    out.push('Item | Description | Times deleted | Qty lost | Sales lost | Last time');
+    L.oos.forEach((it) => out.push([it.item, it.desc || '-', it.times, it.qty, formatRM(it.rm), formatDate(it.last)].join(' | ')));
+    if (!L.oos.length) out.push('(none)');
+    out.push('');
+    out.push('PLEASE WRITE a short morning brief (under 250 words) in ' + lang + ', in simple words, with:');
+    out.push('1. The 3 most important things to do today.');
+    out.push('2. Which orders to deliver first and why (you may group by customer or salesman).');
+    out.push('3. Which items to reorder first and why.');
+    out.push('');
+    out.push('IMPORTANT');
+    out.push('- Use ONLY the data above. Do not guess or invent numbers, customers or items.');
+    out.push('- If the data is not enough to decide something, say so.');
+    out.push('- Write money as RM with 2 decimals and dates like 17 Nov 2026.');
+    out.push('- Do not write messages to customers. This brief is for our managers only.');
+    return out.join('\n');
+  }
+
+  function updateSaveBtn() {
+    $('saveBriefBtn').disabled = !($('aiPrompt').value && $('aiAnswer').value.trim() && $('aiChecked').checked);
+  }
+
+  $('makePromptBtn').addEventListener('click', () => {
+    if (!LAST) return;
+    $('aiPrompt').value = buildPrompt();
+    $('aiAnswer').value = '';
+    $('aiChecked').checked = false;
+    $('copyMsg').textContent = '';
+    hideMsg($('aiMsg'));
+    $('promptBox').classList.remove('hidden');
+    updateSaveBtn();
+  });
+
+  $('copyBtn').addEventListener('click', async () => {
+    try {
+      await navigator.clipboard.writeText($('aiPrompt').value);
+      $('copyMsg').textContent = 'Copied ✔ Now open Claude and paste.';
+    } catch (e) {
+      $('aiPrompt').select();
+      $('copyMsg').textContent = 'Press Ctrl+C (or long-press → Copy) to copy.';
+    }
+  });
+
+  $('aiAnswer').addEventListener('input', updateSaveBtn);
+  $('aiChecked').addEventListener('change', updateSaveBtn);
+
+  $('saveBriefBtn').addEventListener('click', async () => {
+    if (!$('aiChecked').checked) return showMsg($('aiMsg'), 'Please read the answer and tick "I have checked this" first.');
+    const btn = $('saveBriefBtn'); btn.disabled = true;
+    hideMsg($('aiMsg'));
+    const { error } = await db.from('ai_briefs').insert({
+      prompt: $('aiPrompt').value, answer: $('aiAnswer').value.trim(), checked: true, created_by: ME.user.id
+    });
+    if (error) { updateSaveBtn(); return showMsg($('aiMsg'), friendlyError(error)); }
+    await db.rpc('write_audit', { p_action: 'create', p_table: 'ai_briefs', p_record: TODAY, p_details: { date: TODAY } });
+    $('aiAnswer').value = ''; $('aiChecked').checked = false; updateSaveBtn();
+    showMsg($('aiMsg'), 'Saved. Everyone with the Dashboard can read it under "Saved briefs".', 'ok');
+    loadBriefs();
+  });
+
+  async function loadBriefs() {
+    const box = $('briefs');
+    const { data, error } = await db.from('ai_briefs').select('id, created_at, created_by, answer').order('created_at', { ascending: false }).limit(10);
+    box.innerHTML = '';
+    if (error) { const m = document.createElement('div'); box.appendChild(m); return showMsg(m, friendlyError(error)); }
+    if (!data.length) { const p = document.createElement('p'); p.className = 'muted'; p.textContent = 'No briefs saved yet.'; return box.appendChild(p); }
+    data.forEach((b, i) => {
+      const d = document.createElement('details'); d.className = 'brief'; if (i === 0) d.open = true;
+      const s = document.createElement('summary');
+      const who = PEOPLE[b.created_by] ? (PEOPLE[b.created_by].full_name || PEOPLE[b.created_by].email) : '';
+      s.textContent = formatDate(b.created_at) + ' ' + new Date(b.created_at).toLocaleTimeString('en-MY', { hour: 'numeric', minute: '2-digit', timeZone: 'Asia/Kuala_Lumpur' }) +
+        (who ? ' · checked by ' + who : '');
+      const pre = document.createElement('pre'); pre.textContent = b.answer;
+      d.appendChild(s); d.appendChild(pre); box.appendChild(d);
+    });
+  }
   $('clearBtn').addEventListener('click', () => {
     ['fFrom', 'fTo', 'fCustomer', 'fItem', 'fSalesman', 'fDivision', 'fColour'].forEach((id) => { $(id).value = ''; });
     render();
@@ -288,12 +456,16 @@
   (async () => {
     const me = await requireRole(['owner', 'manager']);
     if (!me) return;
+    ME = me;
     renderTopbar(me);
     try {
       TODAY = malaysiaToday();
       await loadSettings();
-      const [lines, forms, last] = await Promise.all([loadLines(), loadOpenForms(), loadLastUpload()]);
+      const [lines, forms, last, people] = await Promise.all([loadLines(), loadOpenForms(), loadLastUpload(),
+        db.from('profiles').select('id, full_name, email')]);
       ALL = lines; openForms = forms;
+      PEOPLE = Object.fromEntries(((people && people.data) || []).map((p) => [p.id, p]));
+      loadBriefs();
       fillSelect('fSalesman', ALL.map((r) => r.salesman));
       fillSelect('fDivision', ALL.map((r) => r.division));
       $('todayLine').textContent = 'Today: ' + formatDate(TODAY);
