@@ -15,6 +15,8 @@
     .menu { display:grid; gap:12px; grid-template-columns:repeat(auto-fit, minmax(200px, 1fr)); }
     .menu .item { border:1px dashed #cbd2d9; border-radius:10px; padding:16px; color:var(--muted); }
     .menu .item b { display:block; color:var(--text); margin-bottom:4px; }
+    .menu .item.ready { border:1px solid var(--brand); text-decoration:none; background:#eff6ff; }
+    .menu .item.ready b { color:var(--brand); }
   </style>
 </head>
 <body>
@@ -75,9 +77,9 @@
 
   // Pages each role will get (coming in the next steps).
   const MENU = {
-    owner:   [['Dashboard', 'Urgent deliveries and top 10 out-of-stock'], ['Upload eFichain Excel', 'Update the order data'],
+    owner:   [['Dashboard', 'Urgent deliveries and top 10 out-of-stock'], ['Upload eFichain Excel', 'Update the order data', 'upload.html'],
               ['Forms to handle', 'Approve delivery and reorder forms'], ['Users', 'Change roles, turn accounts on/off'], ['Settings', 'Change rule numbers']],
-    manager: [['Dashboard', 'Urgent deliveries and top 10 out-of-stock'], ['Upload eFichain Excel', 'Update the order data'],
+    manager: [['Dashboard', 'Urgent deliveries and top 10 out-of-stock'], ['Upload eFichain Excel', 'Update the order data', 'upload.html'],
               ['Forms to handle', 'Approve delivery and reorder forms']],
     staff:   [['Arrange delivery', 'Fill in a delivery form'], ['Need to reorder', 'Fill in a reorder form']]
   };
@@ -159,10 +161,11 @@
     const items = MENU[p.role] || [];
     const menu = $('menu');
     menu.innerHTML = '';
-    items.forEach(([title, desc]) => {
-      const div = document.createElement('div');
-      div.className = 'item';
-      div.innerHTML = '<b></b><span></span><br><small>Coming soon</small>';
+    items.forEach(([title, desc, href]) => {
+      const div = document.createElement(href ? 'a' : 'div');
+      div.className = 'item' + (href ? ' ready' : '');
+      if (href) div.href = href;
+      div.innerHTML = '<b></b><span></span>' + (href ? '' : '<br><small>Coming soon</small>');
       div.querySelector('b').textContent = title;
       div.querySelector('span').textContent = desc;
       menu.appendChild(div);

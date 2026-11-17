@@ -1,0 +1,4 @@
+# Never upload real company data to GitHub
+*.xlsx
+*.xls
+*.csv

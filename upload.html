@@ -1,0 +1,233 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Upload eFichain Excel · YONGHUAT SYSTEM</title>
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+  <script src="config.js"></script>
+  <script src="app.js"></script>
+  <style>
+    .stats { display:grid; gap:12px; grid-template-columns:repeat(auto-fit, minmax(150px, 1fr)); margin-top:12px; }
+    .stat { border:1px solid var(--line); border-radius:10px; padding:12px; }
+    .stat b { display:block; font-size:1.3rem; }
+    .table-wrap { overflow-x:auto; margin-top:12px; }
+    table { border-collapse:collapse; width:100%; font-size:.9rem; }
+    th, td { text-align:left; padding:6px 8px; border-bottom:1px solid var(--line); white-space:nowrap; }
+    th { background:#f8fafc; }
+    .bar { height:10px; background:var(--line); border-radius:6px; overflow:hidden; margin-top:12px; }
+    .bar div { height:100%; width:0; background:var(--brand); transition:width .2s; }
+  </style>
+</head>
+<body>
+  <div class="wrap hidden" id="page">
+    <p><a href="index.html">← Back to menu</a></p>
+
+    <div class="card">
+      <h1>Upload eFichain Excel</h1>
+      <p class="muted">In eFichain, export <b>Daily Order Details Fulfillment</b> as Excel, then choose the file here.
+        Uploading the same order again updates it — it does not double count.</p>
+      <label for="file">Excel file (.xlsx)</label>
+      <input id="file" type="file" accept=".xlsx,.xls">
+      <div id="msg" class="msg"></div>
+    </div>
+
+    <div class="card hidden" id="previewCard">
+      <h2>Check before upload</h2>
+      <div class="stats" id="stats"></div>
+      <div class="table-wrap"><table id="preview"></table></div>
+      <button class="btn btn-full" id="uploadBtn" type="button">Upload to system</button>
+      <div class="bar hidden" id="bar"><div></div></div>
+      <div id="uploadMsg" class="msg"></div>
+    </div>
+  </div>
+
+<script>
+  const $ = (id) => document.getElementById(id);
+  let rowsToUpload = [];
+  let fileName = '';
+
+  // eFichain column name -> our column
+  const COLS = {
+    so_no: 'S/O CODE', customer: 'NAME', so_date: 'DATE', invoice_date: 'INV DATE',
+    item: 'ITEM CODE', item_desc: 'DESCRIPTION', amount: 'S/O NET AMT', qty: 'S/O LOOSE QTY',
+    order_status: 'S/O STATUS', delivery_status: 'SHIP STATUS', line_status: 'STATUS',
+    salesman: 'SALESMAN', division: 'DIVISION CODE'
+  };
+
+  function toText(v) { return v === undefined || v === null ? '' : String(v).trim(); }
+
+  function toNumber(v) {
+    const n = parseFloat(String(v === undefined || v === null ? '' : v).replace(/,/g, ''));
+    return isNaN(n) ? 0 : Math.round(n * 100) / 100;
+  }
+
+  // Accepts 2026-11-10, 2026-11-10 16:49, 10/11/2026, or an Excel date number. Returns yyyy-mm-dd or null.
+  function toDate(v) {
+    if (v === undefined || v === null || v === '' || v === '-') return null;
+    if (typeof v === 'number') {
+      const d = XLSX.SSF.parse_date_code(v);
+      return d ? `${d.y}-${String(d.m).padStart(2, '0')}-${String(d.d).padStart(2, '0')}` : null;
+    }
+    const s = String(v).trim();
+    let m = s.match(/^(\d{4})-(\d{2})-(\d{2})/);
+    if (m) return `${m[1]}-${m[2]}-${m[3]}`;
+    m = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})/);
+    if (m) return `${m[3]}-${m[2].padStart(2, '0')}-${m[1].padStart(2, '0')}`;
+    return null;
+  }
+
+  function parseWorkbook(wb) {
+    const sheet = wb.Sheets[wb.SheetNames[0]];
+    const grid = XLSX.utils.sheet_to_json(sheet, { header: 1, raw: true, defval: '' });
+
+    // Header row = the row that has "S/O CODE" (eFichain puts "Export Time" on row 1)
+    const headerIdx = grid.findIndex((r) => r.some((c) => toText(c).toUpperCase() === 'S/O CODE'));
+    if (headerIdx < 0) throw new Error('NO_HEADER');
+    const header = grid[headerIdx].map((c) => toText(c));
+
+    // Note: eFichain has both "S/O STATUS" and "S/O status" — use the exact, first match.
+    const pos = {};
+    for (const [key, name] of Object.entries(COLS)) {
+      const i = header.indexOf(name);
+      if (i < 0) throw new Error('MISSING:' + name);
+      pos[key] = i;
+    }
+
+    const byKey = new Map();
+    for (const r of grid.slice(headerIdx + 1)) {
+      const so_no = toText(r[pos.so_no]);
+      const item = toText(r[pos.item]);
+      if (!so_no || !item) continue;
+      byKey.set(so_no + '|' + item, {
+        so_no, item,
+        customer: toText(r[pos.customer]),
+        so_date: toDate(r[pos.so_date]),
+        invoice_date: toDate(r[pos.invoice_date]),
+        item_desc: toText(r[pos.item_desc]),
+        amount: toNumber(r[pos.amount]),
+        qty: toNumber(r[pos.qty]),
+        order_status: toText(r[pos.order_status]).toUpperCase(),
+        delivery_status: toText(r[pos.delivery_status]).toUpperCase(),
+        line_status: toText(r[pos.line_status]).toUpperCase(),
+        salesman: toText(r[pos.salesman]),
+        division: toText(r[pos.division])
+      });
+    }
+    return [...byKey.values()];
+  }
+
+  function showPreview(rows) {
+    const dates = rows.map((r) => r.so_date).filter(Boolean).sort();
+    const orders = new Set(rows.map((r) => r.so_no)).size;
+    const deleted = rows.filter((r) => r.line_status === 'DELETED').length;
+    const notDelivered = rows.filter((r) => r.delivery_status !== 'FULFILL' && r.order_status !== 'VOID' && r.line_status !== 'DELETED').length;
+    const total = rows.reduce((s, r) => s + r.amount, 0);
+
+    const stats = [
+      ['Item lines', rows.length.toLocaleString()],
+      ['Sales orders', orders.toLocaleString()],
+      ['Dates', dates.length ? formatDate(dates[0]) + ' – ' + formatDate(dates[dates.length - 1]) : '-'],
+      ['Total S/O amount', formatRM(total)],
+      ['Not yet delivered (lines)', notDelivered.toLocaleString()],
+      ['Deleted at picking (lines)', deleted.toLocaleString()]
+    ];
+    $('stats').innerHTML = '';
+    stats.forEach(([label, val]) => {
+      const d = document.createElement('div');
+      d.className = 'stat';
+      d.innerHTML = '<span class="muted"></span><b></b>';
+      d.querySelector('span').textContent = label;
+      d.querySelector('b').textContent = val;
+      $('stats').appendChild(d);
+    });
+
+    const head = ['S/O', 'Date', 'Customer', 'Item', 'Description', 'Amount', 'S/O status', 'Ship status', 'Item status'];
+    const t = $('preview');
+    t.innerHTML = '';
+    const tr = t.insertRow();
+    head.forEach((h) => { const th = document.createElement('th'); th.textContent = h; tr.appendChild(th); });
+    rows.slice(0, 5).forEach((r) => {
+      const row = t.insertRow();
+      [r.so_no, formatDate(r.so_date), r.customer, r.item, r.item_desc, formatRM(r.amount),
+       r.order_status, r.delivery_status, r.line_status || '-'].forEach((v) => { row.insertCell().textContent = v; });
+    });
+    const note = t.createCaption();
+    note.className = 'muted';
+    note.style.captionSide = 'bottom';
+    note.style.textAlign = 'left';
+    note.textContent = 'Showing first 5 of ' + rows.length.toLocaleString() + ' lines.';
+
+    $('previewCard').classList.remove('hidden');
+    $('uploadBtn').disabled = false;
+    hideMsg($('uploadMsg'));
+  }
+
+  $('file').addEventListener('change', async (e) => {
+    hideMsg($('msg'));
+    $('previewCard').classList.add('hidden');
+    rowsToUpload = [];
+    const file = e.target.files[0];
+    if (!file) return;
+    fileName = file.name;
+    showMsg($('msg'), 'Reading the file…', 'ok');
+    try {
+      const wb = XLSX.read(await file.arrayBuffer(), { type: 'array' });
+      rowsToUpload = parseWorkbook(wb);
+      hideMsg($('msg'));
+      if (!rowsToUpload.length) return showMsg($('msg'), 'This file has no order lines. Please check you exported the right report.');
+      showPreview(rowsToUpload);
+    } catch (err) {
+      const m = String(err.message || err);
+      if (m === 'NO_HEADER') return showMsg($('msg'), 'This does not look like the eFichain fulfillment report (cannot find the "S/O CODE" column).');
+      if (m.startsWith('MISSING:')) return showMsg($('msg'), 'The file is missing the column "' + m.slice(8) + '". Please export the full Daily Order Details Fulfillment report.');
+      showMsg($('msg'), 'Cannot read this file. Please make sure it is an Excel (.xlsx) file.');
+    }
+  });
+
+  $('uploadBtn').addEventListener('click', async () => {
+    if (!rowsToUpload.length) return;
+    const btn = $('uploadBtn');
+    btn.disabled = true;
+    hideMsg($('uploadMsg'));
+    const bar = $('bar');
+    bar.classList.remove('hidden');
+    const fill = bar.querySelector('div');
+
+    const batch = new Date().toISOString();
+    const CHUNK = 500;
+    try {
+      for (let i = 0; i < rowsToUpload.length; i += CHUNK) {
+        const part = rowsToUpload.slice(i, i + CHUNK).map((r) => ({ ...r, upload_batch: batch }));
+        const { error } = await db.from('so_lines').upsert(part, { onConflict: 'so_no,item' });
+        if (error) throw error;
+        fill.style.width = Math.round(Math.min(i + CHUNK, rowsToUpload.length) / rowsToUpload.length * 100) + '%';
+      }
+      await db.rpc('write_audit', {
+        p_action: 'upload', p_table: 'so_lines', p_record: batch,
+        p_details: { file: fileName, lines: rowsToUpload.length }
+      });
+      showMsg($('uploadMsg'), 'Done! ' + rowsToUpload.length.toLocaleString() + ' lines uploaded on ' + formatDate(new Date()) + '.', 'ok');
+      $('file').value = '';
+      rowsToUpload = [];
+    } catch (err) {
+      const m = String(err.message || '');
+      if (/column .* does not exist|Could not find the .* column/i.test(m)) {
+        showMsg($('uploadMsg'), 'The database is not ready yet. Please ask the boss to run supabase/03_efichain_columns.sql in Supabase.');
+      } else {
+        showMsg($('uploadMsg'), friendlyError(err) + ' Nothing is lost — you can upload the same file again.');
+      }
+      btn.disabled = false;
+    }
+  });
+
+  (async () => {
+    const me = await requireRole(['owner', 'manager']);
+    if (!me) return;
+    renderTopbar(me);
+    $('page').classList.remove('hidden');
+  })();
+</script>
+</body>
+</html>
