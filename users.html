@@ -1,0 +1,181 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Users · YONGHUAT SYSTEM</title>
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <script src="config.js"></script>
+  <script src="app.js"></script>
+  <style>
+    .small { font-size:.85rem; }
+    .howto { background:#eff6ff; border-radius:10px; padding:12px 14px; font-size:.92rem; }
+    .howto ol { margin:6px 0 0; padding-left:20px; }
+    .search { margin-bottom:12px; }
+    .users { display:grid; gap:10px; }
+    .user { border:1px solid var(--line); border-radius:10px; padding:12px; display:grid; gap:10px;
+            grid-template-columns:1fr auto; align-items:center; }
+    .user.off { background:#f8fafc; opacity:.75; }
+    .user .name { font-weight:700; }
+    .user .email { font-size:.88rem; color:var(--muted); word-break:break-all; }
+    .user .controls { display:flex; gap:8px; align-items:center; flex-wrap:wrap; justify-content:flex-end; }
+    .user select { width:auto; padding:8px; }
+    .user button { font-size:.88rem; padding:8px 12px; }
+    .b-off { background:#fff; color:var(--red); border-color:var(--red); }
+    .b-on { background:var(--green); color:#fff; }
+    .pill { display:inline-block; padding:2px 8px; border-radius:999px; font-size:.75rem; font-weight:700; margin-left:6px; }
+    .p-off { background:var(--red-bg); color:var(--red); } .p-you { background:#e0e7ff; color:#3730a3; }
+    .log { font-size:.88rem; }
+    .log div { padding:6px 0; border-bottom:1px solid var(--line); }
+    @media (max-width:560px) { .user { grid-template-columns:1fr; } .user .controls { justify-content:flex-start; } }
+  </style>
+</head>
+<body>
+  <div class="wrap" id="loading"><p class="muted">Loading…</p></div>
+
+  <div class="wrap hidden" id="page">
+    <p><a href="index.html">← Back to menu</a></p>
+    <h1>Users</h1>
+    <p class="muted">Only the boss can see this page. Choose each person's role, or turn an account off when someone leaves.</p>
+
+    <div class="card">
+      <div class="howto">
+        <b>How to add a new person</b>
+        <ol>
+          <li>Send them the link: <span id="siteLink"></span></li>
+          <li>They click <b>New account</b>, fill in name, email and password, then click the link in the confirmation email.</li>
+          <li>They appear below as <b>Staff</b>. Change the role here if needed (e.g. Manager).</li>
+        </ol>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="row-between" style="display:flex;justify-content:space-between;align-items:baseline;gap:8px;flex-wrap:wrap">
+        <h2 id="countTitle">People</h2>
+      </div>
+      <input class="search" id="search" type="search" placeholder="Search name or email">
+      <div id="msg" class="msg"></div>
+      <div class="users" id="users"></div>
+      <p class="muted small" style="margin-top:12px">
+        <b>Boss</b>: everything, including delete and this page. <b>Manager</b>: sees all orders, uploads Excel, approves forms.
+        <b>Staff</b>: fills in delivery / reorder forms and sees only their own forms.
+      </p>
+    </div>
+
+    <div class="card">
+      <h2>Recent changes</h2>
+      <div class="log" id="log"></div>
+    </div>
+  </div>
+
+<script>
+  const $ = (id) => document.getElementById(id);
+  let ME = null, PEOPLE = [];
+
+  async function load() {
+    const [{ data: people, error }, { data: log }] = await Promise.all([
+      db.from('profiles').select('id, email, full_name, role, active, created_at').order('created_at'),
+      db.from('audit_log').select('created_at, who_email, details').eq('action', 'role change').order('created_at', { ascending: false }).limit(20)
+    ]);
+    if (error) throw error;
+    PEOPLE = people;
+    renderUsers();
+    renderLog(log || []);
+  }
+
+  function renderUsers() {
+    const q = $('search').value.trim().toLowerCase();
+    const list = PEOPLE.filter((p) => !q || ((p.full_name || '') + ' ' + (p.email || '')).toLowerCase().includes(q));
+    const active = PEOPLE.filter((p) => p.active).length;
+    $('countTitle').textContent = 'People (' + active + ' active' + (PEOPLE.length > active ? ', ' + (PEOPLE.length - active) + ' turned off' : '') + ')';
+    const box = $('users'); box.innerHTML = '';
+    list.forEach((p) => {
+      const isMe = p.id === ME.user.id;
+      const div = document.createElement('div');
+      div.className = 'user' + (p.active ? '' : ' off');
+      div.innerHTML = '<div><div class="name"></div><div class="email"></div></div><div class="controls"></div>';
+      const name = div.querySelector('.name');
+      name.textContent = p.full_name || '(no name)';
+      if (isMe) { const s = document.createElement('span'); s.className = 'pill p-you'; s.textContent = 'You'; name.appendChild(s); }
+      if (!p.active) { const s = document.createElement('span'); s.className = 'pill p-off'; s.textContent = 'Turned off'; name.appendChild(s); }
+      div.querySelector('.email').textContent = p.email + ' · joined ' + formatDate(p.created_at);
+
+      const controls = div.querySelector('.controls');
+      const sel = document.createElement('select');
+      sel.setAttribute('aria-label', 'Role for ' + (p.full_name || p.email));
+      [['owner', 'Boss'], ['manager', 'Manager'], ['staff', 'Staff']].forEach(([v, t]) => {
+        const o = document.createElement('option'); o.value = v; o.textContent = t; if (p.role === v) o.selected = true; sel.appendChild(o);
+      });
+      if (isMe) { sel.disabled = true; sel.title = 'You cannot change your own role.'; }
+      sel.addEventListener('change', () => save(p, { role: sel.value }, sel));
+      controls.appendChild(sel);
+
+      if (!isMe) {
+        const b = document.createElement('button'); b.type = 'button';
+        b.className = p.active ? 'b-off' : 'b-on';
+        b.textContent = p.active ? 'Turn off' : 'Turn on';
+        b.addEventListener('click', () => save(p, { active: !p.active }, b));
+        controls.appendChild(b);
+      }
+      box.appendChild(div);
+    });
+    if (!list.length) { const m = document.createElement('p'); m.className = 'muted'; m.textContent = 'No one found.'; box.appendChild(m); }
+  }
+
+  function roleWord(r) { return ROLE_LABEL[r] || r; }
+
+  async function save(p, change, el) {
+    const who = p.full_name || p.email;
+    let question;
+    if ('role' in change) {
+      question = 'Change ' + who + ' from ' + roleWord(p.role) + ' to ' + roleWord(change.role) + '?';
+      if (change.role === 'owner') question += '\n\nA Boss can do everything, including delete data and change other people\'s roles.';
+    } else {
+      question = change.active
+        ? 'Turn ON ' + who + '\'s account? They will be able to log in and use the system again.'
+        : 'Turn OFF ' + who + '\'s account? They will not be able to see or do anything until you turn it on again.';
+    }
+    if (!confirm(question)) { renderUsers(); return; }
+    el.disabled = true;
+    hideMsg($('msg'));
+    const { error } = await db.from('profiles').update(change).eq('id', p.id);
+    if (error) { el.disabled = false; renderUsers(); return showMsg($('msg'), friendlyError(error)); }
+    await load();
+    showMsg($('msg'), 'Saved: ' + who + ('role' in change ? ' is now ' + roleWord(change.role) : (change.active ? ' is turned on' : ' is turned off')) + '.', 'ok');
+  }
+
+  function renderLog(rows) {
+    const box = $('log'); box.innerHTML = '';
+    if (!rows.length) { box.textContent = 'No changes yet.'; return; }
+    rows.forEach((r) => {
+      const d = r.details || {};
+      const parts = [];
+      if (d.old_role !== d.new_role) parts.push(roleWord(d.old_role) + ' → ' + roleWord(d.new_role));
+      if (d.old_active !== d.new_active) parts.push(d.new_active ? 'turned on' : 'turned off');
+      const line = document.createElement('div');
+      line.textContent = formatDate(r.created_at) + ' · ' + (d.email || '') + ': ' + (parts.join(', ') || 'updated') +
+        ' · by ' + (r.who_email || 'Supabase SQL Editor');
+      box.appendChild(line);
+    });
+  }
+
+  $('search').addEventListener('input', renderUsers);
+
+  (async () => {
+    ME = await requireRole(['owner']);
+    if (!ME) return;
+    renderTopbar(ME);
+    $('siteLink').textContent = location.origin;
+    try {
+      await load();
+      $('loading').classList.add('hidden');
+      $('page').classList.remove('hidden');
+    } catch (err) {
+      $('loading').innerHTML = '';
+      const m = document.createElement('div'); $('loading').appendChild(m);
+      showMsg(m, friendlyError(err));
+    }
+  })();
+</script>
+</body>
+</html>
