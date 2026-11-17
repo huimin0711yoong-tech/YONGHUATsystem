@@ -4,36 +4,176 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>YONGHUAT SYSTEM</title>
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <script src="config.js"></script>
+  <script src="app.js"></script>
   <style>
-    * { box-sizing: border-box; }
-    body {
-      margin: 0;
-      min-height: 100vh;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      padding: 16px;
-      font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
-      background: #f4f6f8;
-      color: #1f2933;
-      text-align: center;
-    }
-    .card {
-      background: #fff;
-      border-radius: 12px;
-      padding: 40px 24px;
-      max-width: 480px;
-      width: 100%;
-      box-shadow: 0 2px 12px rgba(0, 0, 0, 0.08);
-    }
-    h1 { margin: 0 0 8px; font-size: 1.6rem; }
-    p { margin: 0; color: #616e7c; }
+    .login-box { max-width:420px; margin:40px auto; }
+    .tabs { display:flex; gap:8px; margin:16px 0 4px; }
+    .tabs button { flex:1; background:#fff; border-color:#cbd2d9; }
+    .tabs button.active { background:var(--brand); color:#fff; border-color:var(--brand); }
+    .menu { display:grid; gap:12px; grid-template-columns:repeat(auto-fit, minmax(200px, 1fr)); }
+    .menu .item { border:1px dashed #cbd2d9; border-radius:10px; padding:16px; color:var(--muted); }
+    .menu .item b { display:block; color:var(--text); margin-bottom:4px; }
   </style>
 </head>
 <body>
-  <div class="card">
-    <h1>YONGHUAT SYSTEM — coming soon</h1>
-    <p>YONGHUAT MARKETING SDN BHD</p>
+
+  <!-- Loading -->
+  <div id="loading" class="wrap"><p class="muted">Loading…</p></div>
+
+  <!-- Not logged in: Log in / Sign up -->
+  <div id="authView" class="wrap hidden">
+    <div class="card login-box">
+      <h1>YONGHUAT SYSTEM</h1>
+      <p class="muted">YONGHUAT MARKETING SDN BHD</p>
+
+      <div class="tabs">
+        <button type="button" id="tabLogin" class="active">Log in</button>
+        <button type="button" id="tabSignup">New account</button>
+      </div>
+
+      <form id="loginForm">
+        <label for="loginEmail">Email</label>
+        <input id="loginEmail" type="email" autocomplete="email" required>
+        <label for="loginPassword">Password</label>
+        <input id="loginPassword" type="password" autocomplete="current-password" required>
+        <button class="btn btn-full" type="submit">Log in</button>
+      </form>
+
+      <form id="signupForm" class="hidden">
+        <label for="signupName">Full name</label>
+        <input id="signupName" type="text" autocomplete="name" required>
+        <label for="signupEmail">Email</label>
+        <input id="signupEmail" type="email" autocomplete="email" required>
+        <label for="signupPassword">Password (at least 6 characters)</label>
+        <input id="signupPassword" type="password" autocomplete="new-password" minlength="6" required>
+        <button class="btn btn-full" type="submit">Create account</button>
+      </form>
+
+      <div id="authMsg" class="msg"></div>
+    </div>
   </div>
+
+  <!-- Logged in: home -->
+  <div id="homeView" class="hidden">
+    <div class="wrap">
+      <div class="card">
+        <h1 id="hello">Hello</h1>
+        <p class="muted" id="roleLine"></p>
+        <div id="homeMsg" class="msg"></div>
+      </div>
+      <div class="card" id="menuCard">
+        <h2>Menu</h2>
+        <div class="menu" id="menu"></div>
+      </div>
+    </div>
+  </div>
+
+<script>
+  const $ = (id) => document.getElementById(id);
+
+  // Pages each role will get (coming in the next steps).
+  const MENU = {
+    owner:   [['Dashboard', 'Urgent deliveries and top 10 out-of-stock'], ['Upload eFichain Excel', 'Update the order data'],
+              ['Forms to handle', 'Approve delivery and reorder forms'], ['Users', 'Change roles, turn accounts on/off'], ['Settings', 'Change rule numbers']],
+    manager: [['Dashboard', 'Urgent deliveries and top 10 out-of-stock'], ['Upload eFichain Excel', 'Update the order data'],
+              ['Forms to handle', 'Approve delivery and reorder forms']],
+    staff:   [['Arrange delivery', 'Fill in a delivery form'], ['Need to reorder', 'Fill in a reorder form']]
+  };
+
+  function switchTab(which) {
+    const login = which === 'login';
+    $('tabLogin').classList.toggle('active', login);
+    $('tabSignup').classList.toggle('active', !login);
+    $('loginForm').classList.toggle('hidden', !login);
+    $('signupForm').classList.toggle('hidden', login);
+    hideMsg($('authMsg'));
+  }
+  $('tabLogin').addEventListener('click', () => switchTab('login'));
+  $('tabSignup').addEventListener('click', () => switchTab('signup'));
+
+  async function withButton(form, fn) {
+    const btn = form.querySelector('button[type=submit]');
+    btn.disabled = true;
+    try { await fn(); } finally { btn.disabled = false; }
+  }
+
+  $('loginForm').addEventListener('submit', (e) => {
+    e.preventDefault();
+    withButton(e.target, async () => {
+      hideMsg($('authMsg'));
+      const { error } = await db.auth.signInWithPassword({
+        email: $('loginEmail').value.trim(),
+        password: $('loginPassword').value
+      });
+      if (error) return showMsg($('authMsg'), friendlyError(error));
+      await show();
+    });
+  });
+
+  $('signupForm').addEventListener('submit', (e) => {
+    e.preventDefault();
+    withButton(e.target, async () => {
+      hideMsg($('authMsg'));
+      const { data, error } = await db.auth.signUp({
+        email: $('signupEmail').value.trim(),
+        password: $('signupPassword').value,
+        options: {
+          data: { full_name: $('signupName').value.trim() },
+          emailRedirectTo: window.location.origin + window.location.pathname
+        }
+      });
+      if (error) return showMsg($('authMsg'), friendlyError(error));
+      if (data.session) return show();
+      e.target.reset();
+      showMsg($('authMsg'), 'Account created. Please check your email and click the confirmation link, then log in.', 'ok');
+    });
+  });
+
+  async function show() {
+    const me = await getMe();
+    $('loading').classList.add('hidden');
+
+    if (!me) {
+      $('authView').classList.remove('hidden');
+      $('homeView').classList.add('hidden');
+      return;
+    }
+
+    $('authView').classList.add('hidden');
+    $('homeView').classList.remove('hidden');
+    if (!document.querySelector('.topbar')) renderTopbar(me);
+
+    const p = me.profile;
+    $('hello').textContent = 'Hello, ' + ((p && p.full_name) || me.user.email);
+
+    if (!p || !p.active) {
+      $('roleLine').textContent = '';
+      showMsg($('homeMsg'), 'Your account is turned off. Please ask the boss to turn it on.');
+      $('menuCard').classList.add('hidden');
+      return;
+    }
+
+    $('roleLine').textContent = 'You are logged in as: ' + ROLE_LABEL[p.role] + ' · Today is ' + formatDate(new Date());
+    const items = MENU[p.role] || [];
+    const menu = $('menu');
+    menu.innerHTML = '';
+    items.forEach(([title, desc]) => {
+      const div = document.createElement('div');
+      div.className = 'item';
+      div.innerHTML = '<b></b><span></span><br><small>Coming soon</small>';
+      div.querySelector('b').textContent = title;
+      div.querySelector('span').textContent = desc;
+      menu.appendChild(div);
+    });
+  }
+
+  show().catch((err) => {
+    $('loading').classList.add('hidden');
+    $('authView').classList.remove('hidden');
+    showMsg($('authMsg'), friendlyError(err));
+  });
+</script>
 </body>
 </html>
